@@ -2,3 +2,4 @@
 # 先頭の単語がブランチ名で、残りはメモ。外したブランチは消さずにコメントアウトし、理由を書く。
 #
 # branch               note
+carry/delegate-runtime-mode-override delegate_task の runtime mode を provider instance / model ごとの設定で上書きする
