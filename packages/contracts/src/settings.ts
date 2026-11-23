@@ -1363,6 +1363,13 @@ export const CloudSpeechCredentials = Schema.Struct({
   openrouter: CloudSpeechCredential,
 });
 
+export const DelegateRuntimeModeOverride = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.optionalKey(TrimmedNonEmptyString),
+  runtimeMode: RuntimeMode,
+});
+export type DelegateRuntimeModeOverride = typeof DelegateRuntimeModeOverride.Type;
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1605,6 +1612,9 @@ export const ServerSettings = Schema.Struct({
 
   /** Sent by the Usage tab with each summary request to this environment; edit in settings.json. Invalid values are ignored. */
   usageModelFilter: ForwardCompatibleOptional(UsageModelFilter),
+  delegateRuntimeModeOverrides: ForwardCompatibleOptional(
+    Schema.Array(DelegateRuntimeModeOverride),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -1993,6 +2003,7 @@ export const ServerSettingsPatch = Schema.Struct({
   usageModelAliases: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
+  delegateRuntimeModeOverrides: Schema.optional(Schema.Array(DelegateRuntimeModeOverride)),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

@@ -3454,6 +3454,142 @@ describe("OrchestratorMcpService provider resolution", () => {
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
+  it.effect(
+    "cancels a delegated child and grandchild above the parent's mode with an override",
+    () =>
+      Effect.gen(function* () {
+        const driver = ProviderDriverKind.make("codex");
+        const model = "test-model";
+        const alias = "test-alias";
+        const parentModel = "other-model";
+        const overrides = [
+          { providerInstanceId: codexInstanceId, model, runtimeMode: "full-access" },
+        ] as const;
+        const layerSettings = ServerSettings.layerTest({
+          providerInstances: { [codexInstanceId]: { driver: "codex", enabled: true } },
+          delegateRuntimeModeOverrides: overrides,
+        });
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          {
+            instanceId: codexInstanceId,
+            driver,
+            getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+            planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+            openSession: () => Effect.die("The effect worker is off."),
+          },
+        ]);
+        const layerDatabase = SqlitePersistence.layerMemory;
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-delegate-runtime-mode-override" },
+          layerRegistry,
+          { databaseLayer: layerDatabase, runEffectWorker: false },
+        );
+        const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provideMerge(layerOrchestrator),
+          Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+          Layer.provideMerge(layerSettings),
+        );
+        const layerTest = layerOrchestratorService.pipe(
+          Layer.provideMerge(layerThreads),
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              layerRegistry,
+              layerSettings,
+              providerRegistryLayer([
+                {
+                  ...providerSnapshot({ instanceId: codexInstanceId, driver }),
+                  models: [
+                    {
+                      slug: model,
+                      name: model,
+                      isCustom: false,
+                      capabilities: null,
+                      aliases: [alias],
+                    },
+                    { slug: parentModel, name: parentModel, isCustom: false, capabilities: null },
+                  ],
+                },
+              ]),
+              Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:create"),
+            threadId: parentThreadId,
+            projectId,
+            title: "MCP parent",
+            modelSelection: { instanceId: codexInstanceId, model: parentModel },
+            runtimeMode: "auto",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("parent:start"),
+            threadId: parentThreadId,
+            messageId: MessageId.make("parent:message"),
+            text: "Delegate a review.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+          const child = yield* mcp.delegateTask(scope, {
+            task: "Review the change.",
+            target: { model: alias },
+            mode: "async",
+            clientRequestId: "delegate-child",
+          });
+          assert.isNotNull(child.childThreadId);
+          const childShell = yield* orchestrator.getThreadShell(child.childThreadId);
+          assert.equal(childShell?.runtimeMode, "full-access");
+          assert.equal(childShell?.modelSelection.model, alias);
+          const grandchild = yield* mcp.delegateTask(
+            { ...scope, thread: { ...scope.thread!, threadId: child.childThreadId } },
+            {
+              task: "Check the tests.",
+              target: { model: parentModel },
+              mode: "async",
+              clientRequestId: "delegate-grandchild",
+            },
+          );
+          assert.isNotNull(grandchild.childThreadId);
+          const grandchildShell = yield* orchestrator.getThreadShell(grandchild.childThreadId);
+          assert.equal(grandchildShell?.runtimeMode, "full-access");
+
+          yield* settings.updateSettings({ delegateRuntimeModeOverrides: [] });
+          const rejected = yield* mcp
+            .cancelTask(scope, { taskId: child.taskId, clientRequestId: "cancel-without-override" })
+            .pipe(Effect.flip);
+          assert.equal(rejected.code, "runtime_mode_escalation_denied");
+
+          yield* settings.updateSettings({ delegateRuntimeModeOverrides: overrides });
+          const cancelled = yield* mcp.cancelTask(scope, {
+            taskId: child.taskId,
+            clientRequestId: "cancel-with-override",
+          });
+          assert.equal(cancelled.status, "cancel_requested");
+          for (const threadId of [child.childThreadId, grandchild.childThreadId]) {
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(projection.runs[0]?.status, "interrupted");
+          }
+        }).pipe(Effect.provide(layerTest));
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
   it.effect.each(["local", "remote"] as const)(
     "a blocking %s delegation cancelled mid-wait wakes its parent like an async task",
     (placement) =>
