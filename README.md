@@ -44,6 +44,31 @@ upstream-pr/b          https://github.com/pingdotgg/t3code/pull/123
 - `#` で始まる行は無視されます。外したブランチは消さずにコメントアウトし、外した理由を書きます
 - 上から順に merge します。依存があるブランチは依存先より下に書きます
 
+## clone したら最初にやること
+
+```sh
+git remote add upstream https://github.com/pingdotgg/t3code.git
+git fetch origin meta
+git branch meta origin/meta
+git config rerere.enabled true
+
+git show meta:hooks/post-checkout > .git/hooks/post-checkout
+chmod +x .git/hooks/post-checkout
+printf 'AGENTS.override.md\nCLAUDE.local.md\n' >> .git/info/exclude
+.git/hooks/post-checkout
+```
+
+### エージェント向けの案内ファイル
+
+upstream には `AGENTS.md` と `CLAUDE.md` があり、`main` は upstream のまま保つので、そこに fork の案内は書けません。代わりに `post-checkout` hook が、コミットしない案内ファイルを worktree ごとに置きます。
+
+- `AGENTS.override.md`：Codex 向けです。中身は [`agents-override.md`](./agents-override.md) のコピーです。Codex はこのファイルがあると `AGENTS.md` を自動では読まないので、`AGENTS.md` を読むよう中に書いています
+- `CLAUDE.local.md`：Claude Code 向けです。`@AGENTS.override.md` で上のファイルを読み込みます。upstream の `CLAUDE.md` が `@AGENTS.md` を読み込むので、`AGENTS.md` も自動で読まれます
+
+`.git/hooks/` と `.git/info/exclude` は全部の worktree で共有されます。そのため、T3 Code や `git worktree add` で作った worktree にも同じファイルが置かれ、git からは無視されます。
+
+hook は、`meta` ブランチにコミットされた `agents-override.md` を毎回読みます。案内を変えるときは `agents-override.md` を編集してコミットします。hook 自体を変えたときは、上の `git show meta:hooks/post-checkout` の手順でもう一度コピーします。
+
 ## 新しいパッチを始める
 
 ```sh
@@ -55,12 +80,6 @@ git switch -c carry/<name> <現在のベースのタグ>
 始めたら `series` に 1 行足して、`meta` にコミットします。
 
 ## upstream のリリースに追従する
-
-初回だけ rerere を有効にします。一度解いたコンフリクトの解き方を git が覚えて、次から自動で当て直します。
-
-```sh
-git config rerere.enabled true
-```
 
 ### 1. 新しいタグを取る
 
@@ -93,12 +112,18 @@ git range-diff "$OLD..carry/<name>@{1}" "$NEW..carry/<name>"
 
 ```sh
 git switch -c "aspulse/$NEW" "$NEW"
-grep -v '^\s*#' ../t3code-meta/series | awk 'NF { print $1 }' | while read -r branch; do
+git show meta:series | grep -v '^\s*#' | awk 'NF { print $1 }' | while read -r branch; do
   git merge --no-ff --no-edit "$branch" || break
 done
 ```
 
-`series` は `meta` ブランチにあるので、`meta` の worktree の中のファイルを読みます。merge は 1 本ずつ行い、パッチどうしのコンフリクトがどの組み合わせで起きたかが分かるようにしています。
+`series` は `meta` ブランチから直接読むので、`meta` の worktree がなくても動きます。merge は 1 本ずつ行い、パッチどうしのコンフリクトがどの組み合わせで起きたかが分かるようにしています。
+
+パッチどうしが同じ箇所を触っていると、統合ブランチを作り直すたびに同じコンフリクトが起きます。rerere はそのときの解き方を記録し、次から自動で当て直します。手順 2 の rebase では、前回解いた結果がすでにパッチの中身になっているので、rerere の記録はほとんど当たりません。
+
+- 記録は `.git/rr-cache/` にあり、全部の worktree で共有されます。push されないので、別のマシンでは使えません
+- `git gc` のときに、解決済みの記録は 60 日（`gc.rerereResolved`）、未解決の記録は 15 日（`gc.rerereUnresolved`）で消えます
+- 毎回同じ組み合わせでぶつかるなら、片方をもう片方の上に積んで依存関係にするほうが根本的な対処です
 
 ### 5. ビルドして確認したら push する
 
@@ -126,8 +151,10 @@ rebase した `carry/*` と `upstream-pr/*` は履歴が書き換わるので、
 
 ## このブランチを編集する
 
-作業中のブランチを切り替えずに編集できるよう、`meta` は別の worktree に置きます。
+読むだけなら `git show meta:<file>` で足ります。編集するときは、作業中のブランチを切り替えずに済むよう、`meta` を別の worktree に取り出します。
 
 ```sh
 git worktree add ../t3code-meta meta
 ```
+
+編集が終わったら `git worktree remove ../t3code-meta` で消してかまいません。消えるのは作業ディレクトリだけで、`meta` ブランチは残ります。

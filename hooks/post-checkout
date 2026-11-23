@@ -1,0 +1,12 @@
+#!/bin/sh
+# upstream の AGENTS.md / CLAUDE.md を書き換えずに fork の案内を読ませるため、
+# コミットしない案内ファイルを worktree ごとに置く。
+# .git/hooks は全 worktree で共有されるので、git worktree add で作った worktree にも置かれる。
+
+[ "$(git symbolic-ref -q --short HEAD)" = meta ] && exit 0
+
+top=$(git rev-parse --show-toplevel) || exit 0
+content=$(git show meta:agents-override.md 2>/dev/null) || exit 0
+
+printf '%s\n' "$content" > "$top/AGENTS.override.md"
+printf '@AGENTS.override.md\n' > "$top/CLAUDE.local.md"
