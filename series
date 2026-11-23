@@ -3,3 +3,4 @@
 #
 # branch               note
 carry/delegate-runtime-mode-override delegate_task の runtime mode を provider instance / model ごとの設定で上書きする
+carry/fork-release     aspulse-v* タグの push で Linux x64 CLI tarball と macOS arm64 DMG をビルドし Release に載せる

@@ -134,6 +134,20 @@ git push --force-with-lease origin carry/<name> upstream-pr/<name> ...
 
 rebase した `carry/*` と `upstream-pr/*` は履歴が書き換わるので、`--force-with-lease` が必要です。`aspulse/*` は作り直さないので、force push は不要です。
 
+### 6. 配布物をビルドする
+
+`aspulse-$NEW` タグを push すると、`carry/fork-release` が入れた `Fork Release` ワークフローが Linux x64 の CLI tarball と macOS arm64 の DMG をビルドし、タグと同じ名前の GitHub Release に載せます。
+
+```sh
+git tag "aspulse-$NEW" "aspulse/$NEW"
+git push origin "aspulse-$NEW"
+```
+
+- 同じ upstream バージョンで作り直すときは、`aspulse-$NEW-2` のように末尾に番号を付けたタグを push します
+- 進み具合は Actions タブの「Fork Release」で見ます。成功すると Release に `t3-<version>-linux-x64.tar.gz`、`T3-Code-<version>-arm64.dmg`、`SHA256SUMS` が載ります。macOS のビルドが失敗したときは DMG だけが載りません
+- DMG は署名していないので、初回は Gatekeeper に止められます
+- fork のビルドでは `t3 update` も画面からのサーバー更新も使いません。upstream の版に置き換わり、パッチが消えます
+
 ## upstream に同等の機能が入ったとき
 
 - **完全に置き換わった**：`series` の該当行をコメントアウトし、どのバージョンで入ったかを書きます。ブランチは消してかまいません
