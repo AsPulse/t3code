@@ -462,6 +462,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("sort projects sidebar manual created recent")],
   },
   {
+    id: "delegate-runtime-mode-overrides",
+    title: msg("Delegate permissions"),
+    to: "/settings/threads",
+    searchTerms: [msg("delegated tasks subagent runtime mode provider model overrides")],
+    environmentOnly: true,
+    scope: "environment-defaults",
+  },
+  {
     id: "snooze-options",
     title: msg("Snooze options"),
     to: "/settings/threads",
