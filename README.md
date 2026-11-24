@@ -136,17 +136,33 @@ rebase した `carry/*` と `upstream-pr/*` は履歴が書き換わるので、
 
 ### 6. 配布物をビルドする
 
-`aspulse-$NEW` タグを push すると、`carry/fork-release` が入れた `Fork Release` ワークフローが Linux x64 の CLI tarball と macOS arm64 の DMG をビルドし、タグと同じ名前の GitHub Release に載せます。
+`aspulse-$NEW` タグを push すると、「Fork Release」が Linux x64 の CLI tarball をビルドし、タグと同じ名前の GitHub Release に載せます。
 
 ```sh
 git tag "aspulse-$NEW" "aspulse/$NEW"
 git push origin "aspulse-$NEW"
 ```
 
-- 同じ upstream バージョンで作り直すときは、`aspulse-$NEW-2` のように末尾に番号を付けたタグを push します
-- 進み具合は Actions タブの「Fork Release」で見ます。成功すると Release に `t3-<version>-linux-x64.tar.gz`、`T3-Code-<version>-arm64.dmg`、`SHA256SUMS` が載ります。macOS のビルドが失敗したときは DMG だけが載りません
-- DMG は署名していないので、初回は Gatekeeper に止められます
-- fork のビルドでは `t3 update` も画面からのサーバー更新も使いません。upstream の版に置き換わり、パッチが消えます
+同じ upstream バージョンで作り直すときは、`aspulse-$NEW-2` のように末尾に番号を付けます。CI の進み具合は Actions タブの「Fork Release」で見ます。
+
+macOS arm64 の DMG は、Nix と Xcode Command Line Tools が使える Apple Silicon Mac でビルドします。push したタグを指定してください。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/AsPulse/t3code/meta/scripts/build-mac.sh | bash -s -- "aspulse-$NEW" --upload
+```
+
+- `--upload` を付けると、認証済みの `gh` で DMG を Release に載せます。CI と Mac のどちらが先でも Release を作れます。添付を追加するたびに、その時点の全 tarball と DMG を含む `SHA256SUMS` を作り直します
+- DMG は `~/Library/Caches/t3code-fork-build/t3code/release/` に残ります。アプリはアドホック署名で、公証はありません。アドホック署名はビルドごとに変わるので、入れ替えた後の初回起動でキーチェーンへのアクセス許可を求められることがあります。公式版で上書きされないよう、デスクトップの自動更新は無効です
+- Launch check は省きます。起動すると普段使っている T3 Code とユーザーデータや単一インスタンスのロックを共有するためです
+- fork の CLI では `t3 update` も画面からのサーバー更新も使いません。upstream の版に置き換わり、パッチが消えます
+
+Mac にインストールするには `--install` を付けます。起動中の T3 Code があれば終了を待ちます。古いアプリを `~/Library/Caches/t3code-fork-build/backups/` に日時付きの zip で退避し、DMG のアプリを `/Applications/T3 Code (Beta).app` にコピーします。コピーしたアプリの隔離属性も取り除きます。
+
+元に戻すには、T3 Code を終了し、`/Applications` にある新しいアプリをゴミ箱に移します。次に、`<zip>` を退避した zip のパスに置き換えて展開します。
+
+```sh
+ditto -x -k "<zip>" /Applications
+```
 
 ## upstream に同等の機能が入ったとき
 
