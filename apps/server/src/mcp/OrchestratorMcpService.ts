@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type DelegateRuntimeModeOverride,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -134,6 +135,10 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
+import {
+  findDelegateRuntimeModeOverride,
+  resolveDelegateRuntimeMode,
+} from "./delegatedRuntimeModeOverrides.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
@@ -396,6 +401,16 @@ const advertisedModel = (provider: ServerProvider, model: string) =>
   provider.models.find((candidate) =>
     candidate.aliases?.some((alias) => alias.toLowerCase() === model.toLowerCase()),
   );
+
+function delegateRuntimeModeOverride(
+  overrides: ReadonlyArray<DelegateRuntimeModeOverride> | undefined,
+  providers: ReadonlyArray<ServerProvider>,
+  { instanceId, model }: ModelSelection,
+) {
+  const provider = providers.find((provider) => provider.instanceId === instanceId);
+  const slug = (provider && advertisedModel(provider, model)?.slug) ?? model;
+  return findDelegateRuntimeModeOverride(overrides ?? [], instanceId, slug);
+}
 
 /** Antigravity 1.3 IDs append the thinking level (`gemini-3.8-flash-high`); the agent still accepts them. */
 function antigravitySuffixedModel(provider: ServerProvider, model: string) {
@@ -1576,6 +1591,9 @@ const make = Effect.gen(function* () {
   });
 
   const loadProviders = providerRegistry.getProviders;
+  const loadSettings = serverSettings.getSettings.pipe(
+    Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+  );
 
   /** The folder the composer's model picker scans for this thread. */
   const parentWorkspaceCwd = (parent: Pick<OrchestrationV2ThreadProjection, "thread">) =>
@@ -2851,11 +2869,18 @@ const make = Effect.gen(function* () {
         cwd: yield* parentWorkspaceCwd(parent),
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
-      const runtimeMode = yield* resolveRuntimeMode(
-        parent.thread.runtimeMode,
-        input.runtimeMode,
+      const settings = yield* loadSettings;
+      const runtimeMode = yield* resolveDelegateRuntimeMode({
+        parentMode: parent.thread.runtimeMode,
+        requested: input.runtimeMode,
         target,
-      );
+        override: delegateRuntimeModeOverride(
+          settings.delegateRuntimeModeOverrides,
+          providers,
+          target.modelSelection,
+        ),
+        managedPolicy: serverSettings.managedPolicy,
+      });
       const interactionMode = yield* resolveInteractionMode(
         parent.thread.interactionMode,
         input.interactionMode,
@@ -2989,30 +3014,47 @@ const make = Effect.gen(function* () {
       }
       const key = yield* requestKey(input.clientRequestId);
       const parentProjection = yield* loadThreadRecords(scope.thread.threadId, []);
+      const settings = yield* loadSettings;
+      const providers = yield* loadProviders;
+      const parentMode = parentProjection.thread.runtimeMode;
+      let dispatchRuntimeMode = parentMode;
       // Cancelling stops the child and every task under it, each a write to a
       // thread its user may have raised above the parent's modes since it was
       // delegated. All of them are checked before anything is stopped.
       const assertStoppable = Effect.fn("OrchestratorMcpService.assertStoppable")(function* (
         threadId: ThreadId,
+        inheritedLimit: RuntimeMode,
       ): Effect.fn.Return<void, OrchestratorMcpFailure> {
         const shell = yield* threadManagement
           .getThreadShell(threadId)
           .pipe(Effect.mapError(threadManagementFailure));
+        let limit = inheritedLimit;
         if (shell !== null && shell.deletedAt === null) {
-          yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
+          const override = delegateRuntimeModeOverride(
+            settings.delegateRuntimeModeOverrides,
+            providers,
+            shell.modelSelection,
+          );
+          if (override !== undefined && runtimeModeRank(override) > runtimeModeRank(limit)) {
+            limit = override;
+          }
+          yield* resolveRuntimeMode(limit, shell.runtimeMode);
           yield* resolveInteractionMode(
             parentProjection.thread.interactionMode,
             shell.interactionMode,
           );
         }
+        if (runtimeModeRank(limit) > runtimeModeRank(dispatchRuntimeMode)) {
+          dispatchRuntimeMode = limit;
+        }
         const childThreadIds = yield* threadManagement
           .listAppOwnedChildThreadIds(threadId)
           .pipe(Effect.mapError(threadManagementFailure));
         for (const childThreadId of childThreadIds) {
-          yield* assertStoppable(childThreadId);
+          yield* assertStoppable(childThreadId, limit);
         }
       });
-      yield* assertStoppable(childThreadId);
+      yield* assertStoppable(childThreadId, parentMode);
       const parentTask = (yield* loadTasks(scope.thread.threadId, [input.taskId])).find(
         (task) => task.id === input.taskId && task.origin === "app_owned",
       );
@@ -3100,7 +3142,7 @@ const make = Effect.gen(function* () {
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
       const stopWithinLimit = stopChild.pipe(
         Effect.provideService(DispatchModeLimit, {
-          runtimeMode: parentProjection.thread.runtimeMode,
+          runtimeMode: dispatchRuntimeMode,
           interactionMode: parentProjection.thread.interactionMode,
           refused,
         }),
