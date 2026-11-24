@@ -146,11 +146,22 @@ jobs:
           VERSION: ${{ needs.build_bundle.outputs.version }}
           MAC_RESULT: ${{ needs.desktop_mac_arm64.result }}
         run: |
+          shopt -s nullglob
           assets=("t3-${VERSION}-linux-x64.tar.gz")
           if [[ "$MAC_RESULT" == "success" ]]; then
             assets+=(*.dmg)
           fi
-          sha256sum "${assets[@]}" > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --verify-tag --repo "$GITHUB_REPOSITORY" \
-            --title "AsPulse T3 Code ${GITHUB_REF_NAME#aspulse-}" \
-            --notes "Built from $GITHUB_SHA." "${assets[@]}" SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            # Re-running failed jobs lands here after an earlier attempt published
+            # the release. Fetch the archives it holds so SHA256SUMS lists them all.
+            gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*.tar.gz' --pattern '*.dmg' --skip-existing
+            sha256sum -- *.tar.gz *.dmg > SHA256SUMS
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+              "${assets[@]}" SHA256SUMS
+          else
+            sha256sum -- "${assets[@]}" > SHA256SUMS
+            gh release create "$GITHUB_REF_NAME" --verify-tag --repo "$GITHUB_REPOSITORY" \
+              --title "AsPulse T3 Code ${GITHUB_REF_NAME#aspulse-}" \
+              --notes "Built from $GITHUB_SHA." "${assets[@]}" SHA256SUMS
+          fi
