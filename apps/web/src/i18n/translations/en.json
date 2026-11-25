@@ -3438,6 +3438,7 @@
   "dee2b3b21ed86aa8": "Click to queue, {modifier}-click or {shortcut} to steer",
   "35e0b8f7418b4a86": "Click to queue, {modifier}-click to steer",
   "eed080cf5eb25bfd": "Summarize {tokens} tokens of history, then send",
+  "57e02bad1af90248": "Right-click to choose Queue or Steer",
   "e4116d7f64a6f593": "Compact {tokens} tokens of history before sending",
   "d6143c122719b099": "Keep",
   "7335dc479a68818e": "Compact",
