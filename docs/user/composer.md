@@ -256,7 +256,8 @@ empty. Adding text or attachments replaces it with a send button that shows your
 [Follow-up behavior](#send-while-the-agent-is-working): a queue icon for Queue or a steer arrow for
 Steer. Click it or press your send shortcut to use that action. Hold `Cmd` on macOS or `Ctrl` on
 Windows and Linux to switch the button to the opposite action, then click, or use the opposite-action
-shortcut described above.
+shortcut described above. Right-click the button to pick **Queue message** or **Steer message** for
+this message only.
 
 On web and desktop, queued messages appear at the end of the thread as dashed messages that have
 not been sent yet. On mobile they appear above the composer. Each shows its text and any attached
