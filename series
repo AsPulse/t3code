@@ -5,3 +5,4 @@
 carry/delegate-runtime-mode-override delegate_task の runtime mode を provider instance / model ごとの設定で上書きする
 carry/fork-release     aspulse-v* タグの push で Linux x64 CLI tarball をビルドし Release に載せる
 carry/telemetry-off-skips-identity-read テレメトリ無効時は識別子のためにプロバイダーのログインファイルや anonymous ID を読まない
+carry/send-button-context-menu-queue 実行中のターンで送信ボタンを右クリックすると Queue / Steer を選べるメニューを出す
