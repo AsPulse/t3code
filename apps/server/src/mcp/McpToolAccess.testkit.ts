@@ -12,6 +12,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import * as BotRegistry from "../bot/BotRegistryService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 
 const EPOCH = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
@@ -61,6 +62,10 @@ export const liveThreadShell = (
 
 export const liveThreadsLayer = Layer.mock(ThreadManagement.ThreadManagementService)({
   getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+});
+
+export const layerNoBots = Layer.mock(BotRegistry.BotRegistryService)({
+  list: () => Effect.succeed([]),
 });
 
 export const idleThreadProjection = (
