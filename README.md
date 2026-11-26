@@ -12,7 +12,7 @@
 | `carry/<name>` | 自分専用で持ち続ける機能。1 機能につき 1 本 | upstream に同等機能が入るまで |
 | `upstream-pr/<name>` | upstream に PR を出している修正。取り込まれたら消す | PR が閉じるまで |
 | `aspulse/<tag>` | upstream のタグに `series` のブランチを全部 merge したもの。実際にビルドして使う | 作り直さない。古いものはロールバック用に残す |
-| `meta` | このブランチ。運用文書と `series` | 永続 |
+| `meta` | このブランチ。運用文書、`series`、開発用 `flake.nix` | 永続 |
 
 `carry/*` と `upstream-pr/*` は、必ず upstream のリリースタグから生やします。機能どうしは互いに依存させません。依存がどうしても必要なときだけ、後の機能を前の機能のブランチの上に積みます。
 
@@ -68,6 +68,28 @@ upstream には `AGENTS.md` と `CLAUDE.md` があり、`main` は upstream の�
 `.git/hooks/` と `.git/info/exclude` は全部の worktree で共有されます。そのため、T3 Code や `git worktree add` で作った worktree にも同じファイルが置かれ、git からは無視されます。
 
 hook は、`meta` ブランチにコミットされた `agents-override.md` を毎回読みます。案内を変えるときは `agents-override.md` を編集してコミットします。hook 自体を変えたときは、上の `git show meta:hooks/post-checkout` の手順でもう一度コピーします。
+
+### 開発環境（Nix devshell）
+
+開発用の `flake.nix` も、各 `carry/*` や `main` からは切り離してこのブランチ (`meta`) に置きます。Node 26、patchelf 済みの `pnpm`、ローカル `node_modules/.bin/vp` へ委譲する `vp` シム、Rust (`cargo` / `rustc`)、および Linux 向けのパッチ済み Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH`) を提供します。
+
+`meta` を隣に worktree として置いておき、メイン checkout と T3 Code の worktree 親ディレクトリに `.envrc` を配置します。親ディレクトリに置いておけば、新しく作った worktree ごとに `direnv allow` し直す必要がありません。
+
+```sh
+git worktree add ../t3code-meta meta
+
+meta_dir="$(cd ../t3code-meta && pwd)"
+printf 'use flake %s\n' "$meta_dir" > .envrc
+printf '.envrc\n' >> .git/info/exclude
+direnv allow
+
+# T3 Code が作成する worktree 群にも共通で効かせる場合
+mkdir -p ~/.t3/worktrees/t3code
+printf 'use flake %s\n' "$meta_dir" > ~/.t3/worktrees/t3code/.envrc
+direnv allow ~/.t3/worktrees/t3code
+```
+
+direnv が自動で走らない環境（エージェントや単発コマンド）では、`direnv exec . <cmd>` または `nix develop ../t3code-meta -c <cmd>` で実行します。
 
 ## 新しいパッチを始める
 
