@@ -7,3 +7,4 @@ carry/fork-release     aspulse-v* タグの push で Linux x64 CLI tarball を�
 carry/telemetry-off-skips-identity-read テレメトリ無効時は識別子のためにプロバイダーのログインファイルや anonymous ID を読まない
 carry/send-button-context-menu-queue 実行中のターンで送信ボタンを右クリックすると Queue / Steer を選べるメニューを出す
 carry/bot-workspace-sidebar 1 つのプロジェクトを Bot Workspace にし、Work / Bots 2 モードサイドバー・Primary Bot 常駐行・Bot 管理 MCP を追加する
+carry/nested-subagents-in-lineage Lineage パネルで、サブエージェントが起動したサブエージェント（子孫）を入れ子で表示する
