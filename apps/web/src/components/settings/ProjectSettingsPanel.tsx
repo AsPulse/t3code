@@ -53,6 +53,7 @@ import {
   ProjectFaviconPickerDialog,
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
+import { BotWorkspaceSettings } from "./BotWorkspaceSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import {
   defaultProjectIcon,
@@ -690,6 +691,7 @@ function ProjectDetail({
             </>
           ) : null}
         </SettingsSection>
+        <BotWorkspaceSettings environmentId={group.environmentId} projectId={group.id} />
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
         {checkoutChoices}

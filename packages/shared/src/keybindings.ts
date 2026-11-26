@@ -56,6 +56,16 @@ type WhenToken =
 
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+b", command: "sidebar.toggle" },
+  {
+    key: "mod+alt+shift+j",
+    command: "bots.openPrimary",
+    when: "!terminalFocus && !previewFocus",
+  },
+  {
+    key: "mod+alt+shift+b",
+    command: "bots.toggle",
+    when: "!terminalFocus && !previewFocus",
+  },
   { key: "f6", command: "workspace.focusNext" },
   { key: "shift+f6", command: "workspace.focusPrevious" },
   // Some browsers keep plain F6 for their own toolbars; mod+F6 reaches the page in all of them.
