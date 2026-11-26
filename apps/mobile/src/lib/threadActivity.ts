@@ -150,6 +150,8 @@ export interface ThreadFeedMessage {
   readonly senderThreadId?: ThreadId;
   readonly linkedSender?: import("@t3tools/contracts").OrchestrationV2LinkedSender;
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
+  readonly maintenance?: import("@t3tools/contracts").OrchestrationV2Maintenance;
+  readonly suppressFreshSession?: true;
   readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
   readonly sourceThreadId: ThreadId;
   readonly createdAt: string;
@@ -1200,8 +1202,11 @@ function deriveThreadFeedRunFolds(
   latestRun: ThreadFeedLatestRun | null,
   runlessWorkActive: boolean,
   feedFailedRunIds: ReadonlySet<RunId>,
+  maintenancePrompts: ReadonlyMap<RunId, ThreadFeedEntry>,
+  maintenanceOnly: boolean,
   resolve: MessageResolver,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
+  if (maintenanceOnly && maintenancePrompts.size === 0) return new Map();
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const retainedAnswerIds = finalAnswerIds(feed);
   const interruptedRunIds = new Set<RunId>();
@@ -1283,8 +1288,50 @@ function deriveThreadFeedRunFolds(
 
   const activeRunId = unsettledRunId(latestRun);
   const foldsByAnchorId = new Map<string, ThreadFeedRunFold>();
+  if (maintenancePrompts.size > 0) {
+    const entriesByRun = new Map<RunId, ThreadFeedEntry[]>();
+    for (const entry of feed) {
+      const runId = feedEntryRunId(entry);
+      if (runId === null || !maintenancePrompts.has(runId)) continue;
+      const entries = entriesByRun.get(runId);
+      if (entries === undefined) entriesByRun.set(runId, [entry]);
+      else entries.push(entry);
+    }
+    for (const [runId, prompt] of maintenancePrompts) {
+      const entries = entriesByRun.get(runId) ?? [prompt];
+      const latest = latestRun?.runId === runId ? latestRun : null;
+      const deferredWorkItemIds = entries.flatMap((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.flatMap((activity) =>
+              activity.projectedItem.item.deferredWork
+                ? [String(activity.projectedItem.sourceItemId)]
+                : [],
+            )
+          : [],
+      );
+      const label =
+        activeRunId === runId
+          ? resolve(msg("Refreshing context…"))
+          : failedRunIds.has(runId) ||
+              interruptedRunIds.has(runId) ||
+              latest?.status === "cancelled" ||
+              latest?.status === "interrupted"
+            ? resolve(msg("Context refresh failed"))
+            : resolve(msg("Context refreshed"));
+      foldsByAnchorId.set(prompt.id, {
+        runId,
+        createdAt: latest?.completedAt ?? entries.at(-1)?.createdAt ?? prompt.createdAt,
+        hiddenEntryIds: new Set(entries.map((entry) => entry.id)),
+        ...(deferredWorkItemIds.length > 0 ? { deferredWorkItemIds } : {}),
+        label,
+      });
+    }
+  }
+  if (maintenanceOnly) return foldsByAnchorId;
+
   for (const [runId, group] of groupsByRunId) {
     if (
+      maintenancePrompts.has(runId) ||
       runId === activeRunId ||
       (runlessWorkActive && runId === runlessKey) ||
       interruptedRunIds.has(runId) ||
@@ -1740,6 +1787,16 @@ export function deriveThreadFeedPresentation(
   const zenAnswerIds = zen
     ? zenAnswerMessageIds(feed, start, answering, answering ? activeRunId : null)
     : null;
+  const maintenancePrompts = new Map<RunId, ThreadFeedEntry>();
+  for (const entry of feed.slice(start)) {
+    if (
+      entry.type === "message" &&
+      entry.message.maintenance !== undefined &&
+      entry.message.runId !== null
+    ) {
+      maintenancePrompts.set(entry.message.runId, entry);
+    }
+  }
   for (let index = start; index < feed.length; index += 1) {
     let entry = feed[index]!;
     if (
@@ -1753,6 +1810,11 @@ export function deriveThreadFeedPresentation(
     if (runId !== null) {
       if (!firstEntryByRun.has(runId)) firstEntryByRun.set(runId, index);
       lastEntryByRun.set(runId, index);
+    }
+    if (runId !== null && maintenancePrompts.has(runId)) {
+      retainedFeed.push(entry);
+      retainedFeedIndices.push(index);
+      continue;
     }
     if (entry.type === "activity-group" && toolCallVisibility !== "showAll") {
       const shown = activityGroupForVisibility(entry, toolCallVisibility);
@@ -1795,15 +1857,15 @@ export function deriveThreadFeedPresentation(
       compactionItemRunIds.add(entry.runId);
     }
   }
-  const foldsByAnchorId = zen
-    ? new Map<string, ThreadFeedRunFold>()
-    : deriveThreadFeedRunFolds(
-        sourceFeed,
-        latestRun,
-        isWorking && runlessWorkActive,
-        failedRunIds,
-        resolve,
-      );
+  const foldsByAnchorId = deriveThreadFeedRunFolds(
+    sourceFeed,
+    latestRun,
+    isWorking && runlessWorkActive,
+    failedRunIds,
+    maintenancePrompts,
+    zen,
+    resolve,
+  );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
     if (!expandedRunIds.has(fold.runId)) {
@@ -1811,7 +1873,7 @@ export function deriveThreadFeedPresentation(
     }
   }
   // The working run's fold row shows its live timer where "Worked for" lands once it settles.
-  // Zen never folds, so it keeps only the Thinking row.
+  // Zen keeps only the Thinking row for ordinary turns.
   // Runless work folds under its prompt's key once it settles, so the live row takes that key.
   const runlessPrompt =
     activeRunId === null && runlessWorkActive
@@ -1824,7 +1886,8 @@ export function deriveThreadFeedPresentation(
     isWorking &&
     activeWorkStartedAt !== null &&
     liveRunId !== null &&
-    !compactionCommandRunIds.has(liveRunId)
+    !compactionCommandRunIds.has(liveRunId) &&
+    !maintenancePrompts.has(liveRunId)
       ? liveRunFoldRow(liveRunId, activeWorkStartedAt, resolve)
       : null;
   let liveFoldPlaced = false;
@@ -1833,8 +1896,34 @@ export function deriveThreadFeedPresentation(
     liveFold !== null &&
     activeRunId !== null &&
     !sourceFeed.some((entry) => isUserMessageEntry(entry) && feedEntryRunId(entry) === activeRunId);
+  const precedingPrompt = feed
+    .slice(0, start)
+    .findLast(
+      (entry) =>
+        entry.type === "message" &&
+        entry.message.role === "user" &&
+        !isSteerMessage(entry.message) &&
+        entry.message.scheduledTaskId === undefined,
+    );
+  let previousMainPromptWasMaintenance =
+    precedingPrompt?.type === "message" && precedingPrompt.message.maintenance !== undefined;
   for (let sourceIndex = 0; sourceIndex < sourceFeed.length; sourceIndex += 1) {
-    const entry = sourceFeed[sourceIndex]!;
+    let entry = sourceFeed[sourceIndex]!;
+    if (
+      entry.type === "message" &&
+      entry.message.role === "user" &&
+      !isSteerMessage(entry.message) &&
+      entry.message.scheduledTaskId === undefined
+    ) {
+      if (
+        previousMainPromptWasMaintenance &&
+        entry.message.projectedItem?.item.type === "user_message" &&
+        entry.message.projectedItem.item.freshContext
+      ) {
+        entry = { ...entry, message: { ...entry.message, suppressFreshSession: true } };
+      }
+      previousMainPromptWasMaintenance = entry.message.maintenance !== undefined;
+    }
     const feedIndex = retainedFeedIndices[sourceIndex]!;
     if (liveFold !== null && !liveFoldPlaced && feedEntryRunId(entry) === activeRunId) {
       if (isUserMessageEntry(entry)) {
@@ -1935,7 +2024,8 @@ export function deriveThreadFeedPresentation(
     isWorking &&
     activeWorkStartedAt !== null &&
     latestRun?.turnEnded !== true &&
-    (activeRunId === null || !compactionCommandRunIds.has(activeRunId)) &&
+    (activeRunId === null ||
+      (!compactionCommandRunIds.has(activeRunId) && !maintenancePrompts.has(activeRunId))) &&
     !result.some(
       (row) =>
         row.id === LIVE_ACTIVITY_ROW_ID ||
@@ -2691,6 +2781,7 @@ export function buildThreadFeed(
                 ...(item.senderThreadId ? { senderThreadId: item.senderThreadId } : {}),
                 ...(item.linkedSender ? { linkedSender: item.linkedSender } : {}),
                 ...(item.idleCompaction ? { idleCompaction: item.idleCompaction } : {}),
+                ...(item.maintenance ? { maintenance: item.maintenance } : {}),
               }
             : {}),
           visibility: row.visibility,

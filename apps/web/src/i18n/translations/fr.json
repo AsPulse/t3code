@@ -12217,7 +12217,6 @@
   "fb9e7c3349f6597b": "Définir comme principal",
   "d62a1f08c9889ac5": "Modifier l’icône de {name}",
   "2854781de80e88ed": "Ajouter un bot",
-  "3baa1d5793d62ffe": "Renommer le bot",
   "5a4a8bbd4495f323": "Nom du bot",
   "703997e07c47706d": "Ouvrir le bot principal",
   "f399d7361f29f2f8": "Basculer la barre latérale des bots",
@@ -12229,5 +12228,14 @@
   "605daeecb7cc7afd": "{count, plural, one {{count} tâche de bot en cours} other {{count} tâches de bots en cours}}",
   "21f59e1df81ea4cc": "Bots secondaires",
   "6c6cc07c6e8276a9": "Bots : Ouvrir le principal",
-  "7101ee0453059ce8": "Bots : Basculer"
+  "7101ee0453059ce8": "Bots : Basculer",
+  "cc5f9cf3b387f2d5": "Actualisation du contexte…",
+  "19c8ee68aece6b3c": "Échec de l’actualisation du contexte",
+  "bc7fbd14e684173f": "Contexte actualisé",
+  "56882e52919eb27c": "Modifier le bot",
+  "0fd9b4e4dd0c355a": "Rotation du contexte",
+  "9284e19f8117b808": "Seuil de jetons",
+  "9a03b2d9de15c5de": "Renouveler le contexte avant l’expiration du cache du prompt",
+  "e73d99ceeb1a0cba": "Prompt de passation",
+  "d526e7d6d28a1e51": "Prompt de démarrage"
 }

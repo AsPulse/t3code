@@ -1,5 +1,7 @@
 import {
   BotDeleteInput,
+  BotRotateNowInput,
+  BotRotateNowResult,
   BotUpsertInput,
   BotWorkspaceResult,
   BotWorkspaceSetInput,
@@ -9,6 +11,7 @@ import {
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as BotContextRotation from "../../../bot/BotContextRotationService.ts";
 import * as BotRegistry from "../../../bot/BotRegistryService.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -49,6 +52,13 @@ export const BotToolkit = Toolkit.make(
       "Add or edit a bot. New bots get a thread unless you assign one. Setting Primary demotes the previous Primary.",
     parameters: Schema.Struct({ ...target, ...BotUpsertInput.fields }),
     success: BotWorkspaceResult,
+  }).annotate(Tool.Destructive, true),
+  Tool.make("t3_bot_rotate_now", {
+    ...shared,
+    dependencies: [...shared.dependencies, BotContextRotation.BotContextRotationService],
+    description: "Queue a context refresh for an enabled bot.",
+    parameters: Schema.Struct({ ...target, ...BotRotateNowInput.fields }),
+    success: BotRotateNowResult,
   }).annotate(Tool.Destructive, true),
   Tool.make("t3_bot_delete", {
     ...shared,

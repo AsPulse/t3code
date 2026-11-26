@@ -5184,3 +5184,77 @@ describe("workEntryReadOutput", () => {
     ).toBe("/workspace/t3code/src/app.ts\n~/.claude/CLAUDE.md\n~/.gitconfig");
   });
 });
+
+describe("bot rotation fold", () => {
+  it.each([
+    { status: "running", label: "Refreshing context…" },
+    { status: "completed", label: "Context refreshed" },
+    { status: "failed", label: "Context refresh failed" },
+  ] as const)(
+    "folds the entire $status rotation and the next fresh divider",
+    ({ status, label }) => {
+      const fixture = makeStreamingTimelineFixture("Saved handoff");
+      const next = fixture.visibleTurnItems[0]!;
+      const visibleTurnItems = [
+        ...fixture.visibleTurnItems.slice(3).map(({ item, ...row }) => ({
+          ...row,
+          item:
+            item.type === "user_message"
+              ? { ...item, text: "Write a handoff", maintenance: "bot_context_rotation" as const }
+              : item.type === "assistant_message" && status !== "running"
+                ? { ...item, streaming: false, status: "completed" as const }
+                : item,
+        })),
+        ...(status !== "running" && next.item.type === "user_message"
+          ? [
+              {
+                ...next,
+                position: 6,
+                item: {
+                  ...next.item,
+                  ...fixture.base("after-rotation", RunId.make("after-rotation"), 9),
+                  freshContext: true,
+                },
+              },
+            ]
+          : []),
+      ];
+      const input = {
+        timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+          visibleTurnItems,
+          optimisticMessages: [],
+        }),
+        latestRun: {
+          runId: fixture.runId,
+          status,
+          startedAt: fixture.time(5),
+          completedAt: status === "running" ? null : fixture.time(8),
+        },
+        isWorking: status === "running",
+        activeTurnStartedAt: fixture.time(5),
+        supportsConversationRollback: false,
+        turnDiffSummaries: [],
+      };
+      const collapsed = deriveMessagesTimelineRows(input);
+      expect(collapsed.map((row) => row.kind)).toEqual(
+        status === "running" ? ["turn-fold"] : ["turn-fold", "message"],
+      );
+      expect(collapsed[0]).toMatchObject({ label, expanded: false });
+      if (status !== "running") expect(collapsed[1]).toMatchObject({ suppressFreshSession: true });
+
+      const expanded = deriveMessagesTimelineRows({
+        ...input,
+        expandedRunIds: new Set([fixture.runId]),
+      });
+      expect(expanded[0]).toMatchObject({ label, expanded: true });
+      expect(expanded.find((row) => row.kind === "work" || row.kind === "work-live")).toBeDefined();
+      expect(
+        expanded.filter((row) => row.kind === "message").map((row) => row.message.text),
+      ).toEqual(
+        status === "running"
+          ? ["Write a handoff", "Saved handoff"]
+          : ["Write a handoff", "Saved handoff", "Inspect"],
+      );
+    },
+  );
+});

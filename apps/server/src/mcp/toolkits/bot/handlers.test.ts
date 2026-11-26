@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
+  BotId,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -10,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
+import * as BotContextRotation from "../../../bot/BotContextRotationService.ts";
 import * as BotRegistryTest from "../../../bot/BotRegistryService.testkit.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -38,6 +40,23 @@ const layer = (runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMod
       } satisfies ThreadManagement.ThreadManagementService["Service"];
     }),
   ).pipe(Layer.provide(BotRegistryTest.layer));
+  const layerRotation = Layer.effect(
+    BotContextRotation.BotContextRotationService,
+    Effect.gen(function* () {
+      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+      return BotContextRotation.BotContextRotationService.of({
+        start: () => Effect.void,
+        rotateNow: () =>
+          executor.withLock(
+            callerId,
+            Effect.succeed({
+              threadId: callerId,
+              status: "dispatched",
+            }),
+          ),
+      });
+    }),
+  ).pipe(Layer.provide(ThreadCommandExecutor.layer));
   const invocation = Layer.succeed(McpInvocationContext.McpInvocationContext, {
     environmentId,
     requestNamespace: "provider:bots",
@@ -66,6 +85,7 @@ const layer = (runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMod
         }),
         BotRegistryTest.layer,
         layerCallerThreads,
+        layerRotation,
       ),
     ),
   );
@@ -119,9 +139,23 @@ it.effect.each([
         .handle("t3_bot_upsert", { projectId, name: "Denied" })
         .pipe(Stream.unwrap, Stream.runCollect);
       expect(upsert.at(-1)?.result).toMatchObject({ code: "capability_denied" });
+      const rotate = yield* toolkit
+        .handle("t3_bot_rotate_now", { projectId, botId: BotId.make("resident") })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      expect(rotate.at(-1)?.result).toMatchObject({ code: "capability_denied" });
       const listed = yield* toolkit
         .handle("t3_bot_list", {})
         .pipe(Stream.unwrap, Stream.runCollect);
       expect(listed.at(-1)?.result).toEqual({ workspaces: [] });
     }).pipe(Effect.provide(layer(runtimeMode, interactionMode))),
+);
+
+it.effect("lets a bot request rotation on its own thread without reacquiring its caller lock", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* BotToolkit;
+    const rotated = yield* toolkit
+      .handle("t3_bot_rotate_now", { projectId, botId: BotId.make("resident") })
+      .pipe(Stream.unwrap, Stream.runCollect);
+    expect(rotated.at(-1)?.result).toEqual({ threadId: callerId, status: "dispatched" });
+  }).pipe(Effect.provide(layer("full-access", "default"))),
 );

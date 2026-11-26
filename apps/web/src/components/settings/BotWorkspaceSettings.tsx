@@ -5,7 +5,13 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import type { BotEntry, BotUpsertInput, EnvironmentId, ProjectId } from "@t3tools/contracts";
+import {
+  BOT_ROTATION_PROMPT_MAX_LENGTH,
+  type BotEntry,
+  type BotUpsertInput,
+  type EnvironmentId,
+  type ProjectId,
+} from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useGT } from "gt-react";
 import {
@@ -16,7 +22,7 @@ import {
   PlusIcon,
   Trash2Icon,
 } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useId, useState } from "react";
 
 import { readLocalApi } from "../../localApi";
 import { resolveProjectDefaultProviderModelSelection } from "../../providerInstances";
@@ -35,11 +41,25 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
+import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 const commands = serverEnvironment.bots;
+
+function editBot(bot?: BotEntry) {
+  return {
+    bot,
+    name: bot?.name ?? "",
+    enabled: bot?.contextRotation?.enabled ?? false,
+    flushPrompt: bot?.contextRotation?.flushPrompt ?? "",
+    bootstrapPrompt: bot?.contextRotation?.bootstrapPrompt ?? "",
+    tokenThreshold: bot?.contextRotation?.tokenThreshold?.toString() ?? "",
+    rotateBeforeCacheExpires: bot?.contextRotation?.rotateBeforeCacheExpires ?? false,
+  };
+}
 const ProjectIconPickerDialog = lazy(() =>
   import("./ProjectIconPickerDialog").then(({ ProjectIconPickerDialog }) => ({
     default: ProjectIconPickerDialog,
@@ -54,13 +74,14 @@ export function BotWorkspaceSettings({
   readonly projectId: ProjectId;
 }) {
   const gt = useGT();
+  const rotationId = useId();
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const canEdit = useAtomValue(commands.setWorkspace.permissionAtom(environmentId));
   const setWorkspace = useAtomCommand(commands.setWorkspace, { reportFailure: false });
   const upsert = useAtomCommand(commands.upsert, { reportFailure: false });
   const deleteBot = useAtomCommand(commands.delete, { reportFailure: false });
   const [pending, setPending] = useState(false);
-  const [nameEditor, setNameEditor] = useState<{ bot?: BotEntry; name: string } | null>(null);
+  const [botEditor, setBotEditor] = useState<ReturnType<typeof editBot> | null>(null);
   const [iconEditor, setIconEditor] = useState<BotEntry | null>(null);
   const workspace = config?.settings.projectSettingsOverrides[projectId]?.botWorkspace;
   const bots = workspace?.bots.toSorted((left, right) => left.order - right.order) ?? [];
@@ -129,14 +150,40 @@ export function BotWorkspaceSettings({
     return modelSelection ? { modelSelection } : {};
   };
 
-  const submitName = async () => {
-    if (nameEditor === null) return;
-    const name = nameEditor.name.trim();
-    if (name.length === 0) return;
-    const result = await save(
-      nameEditor.bot ? { botId: nameEditor.bot.id, name } : { name, ...newBotModel() },
-    );
-    if (result._tag === "Success") setNameEditor(null);
+  const tokenThreshold = botEditor?.tokenThreshold ? Number(botEditor.tokenThreshold) : undefined;
+  const canSave =
+    botEditor !== null &&
+    botEditor.name.trim() !== "" &&
+    (!botEditor.enabled || botEditor.flushPrompt.trim() !== "") &&
+    (tokenThreshold === undefined || (Number.isSafeInteger(tokenThreshold) && tokenThreshold > 0));
+
+  const submitBot = async () => {
+    if (!canSave) return;
+    const { bot, name, enabled, flushPrompt, bootstrapPrompt, rotateBeforeCacheExpires } =
+      botEditor;
+    const hasRotation =
+      bot?.contextRotation !== undefined ||
+      enabled ||
+      flushPrompt !== "" ||
+      bootstrapPrompt !== "" ||
+      rotateBeforeCacheExpires ||
+      tokenThreshold !== undefined;
+    const result = await save({
+      name: name.trim(),
+      ...(bot ? { botId: bot.id } : newBotModel()),
+      ...(hasRotation
+        ? {
+            contextRotation: {
+              enabled,
+              flushPrompt,
+              bootstrapPrompt,
+              rotateBeforeCacheExpires,
+              ...(tokenThreshold === undefined ? {} : { tokenThreshold }),
+            },
+          }
+        : {}),
+    });
+    if (result._tag === "Success") setBotEditor(null);
   };
 
   return (
@@ -209,8 +256,8 @@ export function BotWorkspaceSettings({
                     size="icon-sm"
                     variant="ghost"
                     disabled={disabled}
-                    aria-label={gt("Rename {name}", { name: bot.name })}
-                    onClick={() => setNameEditor({ bot, name: bot.name })}
+                    aria-label={gt("Edit {name}", { name: bot.name })}
+                    onClick={() => setBotEditor(editBot(bot))}
                   >
                     <PencilIcon />
                   </Button>
@@ -241,7 +288,7 @@ export function BotWorkspaceSettings({
               size="sm"
               variant="outline"
               disabled={disabled}
-              onClick={() => setNameEditor({ name: "" })}
+              onClick={() => setBotEditor(editBot())}
             >
               <PlusIcon />
               {gt("Add bot")}
@@ -249,11 +296,11 @@ export function BotWorkspaceSettings({
           </div>
         </>
       ) : null}
-      {nameEditor !== null ? (
+      {botEditor !== null ? (
         <Dialog
           open
           onOpenChange={(open) => {
-            if (!open) setNameEditor(null);
+            if (!open) setBotEditor(null);
           }}
         >
           <DialogPopup>
@@ -261,25 +308,93 @@ export function BotWorkspaceSettings({
               className="flex min-h-0 flex-col"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!disabled) void withPending(submitName);
+                if (!disabled) void withPending(submitBot);
               }}
             >
               <DialogHeader>
-                <DialogTitle>{nameEditor.bot ? gt("Rename bot") : gt("Add bot")}</DialogTitle>
+                <DialogTitle>{botEditor.bot ? gt("Edit bot") : gt("Add bot")}</DialogTitle>
               </DialogHeader>
               <DialogPanel>
                 <Input
                   aria-label={gt("Bot name")}
                   maxLength={64}
-                  value={nameEditor.name}
+                  value={botEditor.name}
                   onChange={(event) =>
-                    setNameEditor({ ...nameEditor, name: event.currentTarget.value })
+                    setBotEditor({ ...botEditor, name: event.currentTarget.value })
                   }
                 />
+                <fieldset className="mt-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label htmlFor={`${rotationId}-enabled`}>{gt("Context rotation")}</Label>
+                    <Switch
+                      id={`${rotationId}-enabled`}
+                      checked={botEditor.enabled}
+                      onCheckedChange={(enabled) => setBotEditor({ ...botEditor, enabled })}
+                    />
+                  </div>
+                  {botEditor.enabled ? (
+                    <>
+                      <div className="flex flex-col gap-1">
+                        <Label htmlFor={`${rotationId}-threshold`}>{gt("Token threshold")}</Label>
+                        <Input
+                          id={`${rotationId}-threshold`}
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={botEditor.tokenThreshold}
+                          onChange={(event) =>
+                            setBotEditor({
+                              ...botEditor,
+                              tokenThreshold: event.currentTarget.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <Label htmlFor={`${rotationId}-cache`}>
+                          {gt("Rotate before the prompt cache expires")}
+                        </Label>
+                        <Switch
+                          id={`${rotationId}-cache`}
+                          checked={botEditor.rotateBeforeCacheExpires}
+                          onCheckedChange={(rotateBeforeCacheExpires) =>
+                            setBotEditor({ ...botEditor, rotateBeforeCacheExpires })
+                          }
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <Label htmlFor={`${rotationId}-flush`}>{gt("Flush prompt")}</Label>
+                        <Textarea
+                          id={`${rotationId}-flush`}
+                          required
+                          maxLength={BOT_ROTATION_PROMPT_MAX_LENGTH}
+                          value={botEditor.flushPrompt}
+                          onChange={(event) =>
+                            setBotEditor({ ...botEditor, flushPrompt: event.currentTarget.value })
+                          }
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <Label htmlFor={`${rotationId}-bootstrap`}>{gt("Bootstrap prompt")}</Label>
+                        <Textarea
+                          id={`${rotationId}-bootstrap`}
+                          maxLength={BOT_ROTATION_PROMPT_MAX_LENGTH}
+                          value={botEditor.bootstrapPrompt}
+                          onChange={(event) =>
+                            setBotEditor({
+                              ...botEditor,
+                              bootstrapPrompt: event.currentTarget.value,
+                            })
+                          }
+                        />
+                      </div>
+                    </>
+                  ) : null}
+                </fieldset>
               </DialogPanel>
               <DialogFooter>
-                <Button type="submit" disabled={disabled || nameEditor.name.trim().length === 0}>
-                  {nameEditor.bot ? gt("Save") : gt("Add bot")}
+                <Button type="submit" disabled={disabled || !canSave}>
+                  {botEditor.bot ? gt("Save") : gt("Add bot")}
                 </Button>
               </DialogFooter>
             </form>

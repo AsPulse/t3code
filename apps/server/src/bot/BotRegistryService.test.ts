@@ -19,7 +19,16 @@ it.effect("keeps saved bots and other overrides while enabling only one workspac
     const bots = yield* Bots.BotRegistryService;
     const settings = yield* Settings.ServerSettingsService;
     yield* bots.setWorkspace({ projectId, enabled: true });
-    const created = yield* bots.upsert({ projectId, name: "Resident" });
+    const contextRotation = {
+      enabled: true,
+      flushPrompt: "Save a handoff",
+      bootstrapPrompt: "Read the handoff",
+      tokenThreshold: 100,
+    };
+    const added = yield* bots.upsert({ projectId, name: "Resident", contextRotation });
+    const botId = added.bots[0]!.id;
+    const created = yield* bots.upsert({ projectId, botId, name: "Renamed resident" });
+    expect(created.bots[0]?.contextRotation).toEqual(contextRotation);
     yield* bots.setWorkspace({ projectId: otherId, enabled: true });
     expect(yield* bots.list()).toEqual([
       { ...created, enabled: false },
@@ -29,6 +38,9 @@ it.effect("keeps saved bots and other overrides while enabling only one workspac
       ...projectOverrides,
       botWorkspace: { enabled: false, bots: created.bots },
     });
+    yield* bots.setWorkspace({ projectId, enabled: true });
+    const cleared = yield* bots.upsert({ projectId, botId, contextRotation: null });
+    expect(cleared.bots[0]).not.toHaveProperty("contextRotation");
     yield* Effect.all(
       [
         bots.setWorkspace({ projectId: otherId, enabled: true }),
