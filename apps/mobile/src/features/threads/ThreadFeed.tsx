@@ -4247,7 +4247,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         <ThreadMediaVisibility rowId={info.item.id} setRetainedRowId={setRetainedMediaRowId}>
           {info.item.type === "message" &&
           info.item.message.projectedItem?.item.type === "user_message" &&
-          info.item.message.projectedItem.item.freshContext ? (
+          info.item.message.projectedItem.item.freshContext &&
+          !info.item.message.suppressFreshSession ? (
             <ThreadContextDivider
               label={gt("New session")}
               icon="arrow.clockwise"

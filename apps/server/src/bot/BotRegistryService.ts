@@ -156,6 +156,8 @@ const make = Effect.gen(function* () {
     const icon = input.icon === undefined ? previous?.icon : input.icon;
     const modelSelection =
       input.modelSelection === undefined ? previous?.modelSelection : input.modelSelection;
+    const contextRotation =
+      input.contextRotation === undefined ? previous?.contextRotation : input.contextRotation;
     const role = input.role ?? previous?.role ?? "secondary";
     const order =
       input.order ??
@@ -217,6 +219,7 @@ const make = Effect.gen(function* () {
           order,
           ...(icon == null ? {} : { icon }),
           ...(modelSelection == null ? {} : { modelSelection }),
+          ...(contextRotation == null ? {} : { contextRotation }),
         };
         const bots = workspace.bots.map((bot): BotEntry => {
           if (bot.id === id) return entry;

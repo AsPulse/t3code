@@ -5334,5 +5334,8 @@
   "ad208e3e32c85029": "Hide all",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Tool calls in chat",
-  "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show."
+  "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show.",
+  "cc5f9cf3b387f2d5": "Refreshing context…",
+  "19c8ee68aece6b3c": "Context refresh failed",
+  "bc7fbd14e684173f": "Context refreshed"
 }

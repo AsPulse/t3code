@@ -1,6 +1,7 @@
 import { OrchestratorMcpFailure, type BotRegistryError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import * as BotContextRotation from "../../../bot/BotContextRotationService.ts";
 import * as BotRegistry from "../../../bot/BotRegistryService.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -58,6 +59,16 @@ export const layer = McpToolAccess.toLayer(BotToolkit, {
   ),
   t3_bot_upsert: McpToolAccess.writesEnvironment((input, check) =>
     write(check, (bots) => bots.upsert(input, "mcp")),
+  ),
+  t3_bot_rotate_now: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const rotation = yield* BotContextRotation.BotContextRotationService;
+      // Dispatch takes the bot's thread lock, which may be the caller's lock.
+      const rotate = yield* write(check, () =>
+        Effect.succeed(rotation.rotateNow(input).pipe(Effect.mapError(failure))),
+      );
+      return yield* rotate;
+    }),
   ),
   t3_bot_delete: McpToolAccess.writesEnvironment((input, check) =>
     write(check, (bots) => bots.delete(input)),
