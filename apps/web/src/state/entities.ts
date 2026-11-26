@@ -55,6 +55,9 @@ const EMPTY_THREAD_REFS_ATOM = Atom.make(EMPTY_THREAD_REFS).pipe(
 const EMPTY_THREAD_SHELLS_ATOM = Atom.make<ReadonlyArray<EnvironmentThreadShell>>(
   Object.freeze([]),
 ).pipe(Atom.withLabel("web-thread-shells:empty"));
+const EMPTY_RELATIONSHIP_SHELLS_ATOM = Atom.make<ReadonlyArray<OrchestrationV2ThreadShell>>(
+  Object.freeze([]),
+).pipe(Atom.withLabel("web-relationship-shells:empty"));
 const EMPTY_THREAD_SHELL_ATOM = Atom.make<EnvironmentThreadShell | null>(null).pipe(
   Atom.withLabel("web-thread-shell:empty"),
 );
@@ -455,6 +458,64 @@ export function useThreadRelationshipShells(
   ref: ScopedThreadRef,
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
   return useAtomValue(relationshipShellsAtomFamily(threadKey(ref)));
+}
+
+const subagentChildrenAtomFamily = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => {
+    const children = new Map<ThreadId, OrchestrationV2ThreadShell[]>();
+    for (const shell of get(environmentThreadShells.environmentThreadsAtom(environmentId))) {
+      const parent = shell.lineage.parentThreadId;
+      if (
+        parent === null ||
+        shell.lineage.relationshipToParent !== "subagent" ||
+        shell.lineage.sideChat ||
+        shell.archivedAt != null
+      ) {
+        continue;
+      }
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(shell);
+      else children.set(parent, [shell]);
+    }
+    return children;
+  }).pipe(Atom.withLabel(`web-subagent-children:${environmentId}`)),
+);
+
+const subagentDescendantShellsAtomFamily = Atom.family((key: string) => {
+  const ref = parseThreadKey(key);
+  let previous: ReadonlyArray<OrchestrationV2ThreadShell> = [];
+  return Atom.make((get) => {
+    const children = get(subagentChildrenAtomFamily(ref.environmentId));
+    const visited = new Set([ref.threadId]);
+    const next: OrchestrationV2ThreadShell[] = [];
+    const visit = (shell: OrchestrationV2ThreadShell) => {
+      if (visited.has(shell.id)) return;
+      visited.add(shell.id);
+      next.push(
+        get(environmentThreadShells.quietThreadShellAtom({ ...ref, threadId: shell.id }))?.source ??
+          shell,
+      );
+    };
+    for (const child of children.get(ref.threadId) ?? []) visit(child);
+    for (const shell of next) {
+      for (const child of children.get(shell.id) ?? []) visit(child);
+    }
+    if (arrayElementsEqual(previous, next)) return previous;
+    previous = next;
+    return next;
+  }).pipe(Atom.withLabel(`web-subagent-descendant-shells:${key}`));
+});
+
+export function subagentDescendantShellsAtom(ref: ScopedThreadRef) {
+  return subagentDescendantShellsAtomFamily(threadKey(ref));
+}
+
+export function useSubagentDescendantShells(
+  ref: ScopedThreadRef | null,
+): ReadonlyArray<OrchestrationV2ThreadShell> {
+  return useAtomValue(
+    ref === null ? EMPTY_RELATIONSHIP_SHELLS_ATOM : subagentDescendantShellsAtom(ref),
+  );
 }
 
 interface SubagentChild {
