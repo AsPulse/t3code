@@ -51,9 +51,12 @@ git remote add upstream https://github.com/pingdotgg/t3code.git
 git fetch origin meta
 git branch meta origin/meta
 git config rerere.enabled true
+git config core.hooksPath "$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
 
-git show meta:hooks/post-checkout > .git/hooks/post-checkout
-chmod +x .git/hooks/post-checkout
+for hook in post-checkout pre-commit; do
+  git show "meta:hooks/$hook" > ".git/hooks/$hook"
+  chmod +x ".git/hooks/$hook"
+done
 printf 'AGENTS.override.md\nCLAUDE.local.md\n' >> .git/info/exclude
 .git/hooks/post-checkout
 ```
@@ -67,7 +70,9 @@ upstream には `AGENTS.md` と `CLAUDE.md` があり、`main` は upstream の�
 
 `.git/hooks/` と `.git/info/exclude` は全部の worktree で共有されます。そのため、T3 Code や `git worktree add` で作った worktree にも同じファイルが置かれ、git からは無視されます。
 
-hook は、`meta` ブランチにコミットされた `agents-override.md` を毎回読みます。案内を変えるときは `agents-override.md` を編集してコミットします。hook 自体を変えたときは、上の `git show meta:hooks/post-checkout` の手順でもう一度コピーします。
+upstream は `vp i` (`prepare`) のたびに `core.hooksPath` を `.vite-hooks/_` に書き換えようとしますが、あらかじめ `.git/hooks` の絶対パスを `core.hooksPath` に設定しておくと `vp` は上書きせずスキップします。upstream の `.vite-hooks/pre-commit` は `.git/hooks/pre-commit` から委譲しています。
+
+hook は、`meta` ブランチにコミットされた `agents-override.md` を毎回読みます。案内を変えるときは `agents-override.md` を編集してコミットします。hook 自体を変えたときは、上の `git show meta:hooks/...` の手順でもう一度コピーします。
 
 ### 開発環境（Nix devshell）
 
