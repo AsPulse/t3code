@@ -586,7 +586,7 @@ function SubagentChildren(props: {
       className={cn(
         "m-0 list-none p-0",
         props.depth <= 3 &&
-          "relative ps-4 before:absolute before:inset-y-0 before:start-0 before:w-px before:bg-border",
+          "relative ps-4 before:absolute before:inset-y-0 before:start-3.5 before:w-px before:bg-border",
       )}
     >
       {rows.map((row) =>
