@@ -143,7 +143,7 @@ export const makeCommandGate = Effect.gen(function* () {
   } satisfies CommandGate;
 });
 
-const recordStartupHeartbeat = Effect.gen(function* () {
+export const recordStartupHeartbeat = Effect.gen(function* () {
   const analytics = yield* AnalyticsService.AnalyticsService;
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -172,7 +172,9 @@ const recordStartupHeartbeat = Effect.gen(function* () {
     threadCount,
     projectCount,
   });
-  yield* analytics.recordOwners(yield* getServerOwners, "server");
+  if (yield* analytics.enabled) {
+    yield* analytics.recordOwners(yield* getServerOwners, "server");
+  }
 });
 
 const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
