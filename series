@@ -6,7 +6,8 @@ carry/delegate-runtime-mode-override delegate_task の runtime mode を provider
 carry/fork-release     aspulse-v* タグの push で Linux x64 CLI tarball をビルドし Release に載せる
 carry/telemetry-off-skips-identity-read テレメトリ無効時は識別子のためにプロバイダーのログインファイルや anonymous ID を読まない
 carry/send-button-context-menu-queue 実行中のターンで送信ボタンを右クリックすると Queue / Steer を選べるメニューを出す
-carry/bot-workspace-sidebar 1 つのプロジェクトを Bot Workspace にし、Work / Bots 2 モードサイドバー・Primary Bot 常駐行・Bot 管理 MCP を追加する
+# carry/bot-workspace-sidebar carry/bots に統合
 carry/nested-subagents-in-lineage Lineage パネルで、サブエージェントが起動したサブエージェント（子孫）を入れ子で表示する
-carry/bot-tasks-wakeup Bot 発 t3_thread_launch の自動タグ付けと、完了・失敗・承認待ちを親 Bot へ自動ウェイクバックする Reactor を追加する
-carry/bot-context-rotation Bot スレッドの汎用コンテキストローテーション（Flush→freshContext 引き継ぎ）とタイムラインの 1 行ディバイダを追加する
+# carry/bot-tasks-wakeup carry/bots に統合
+# carry/bot-context-rotation carry/bots に統合
+carry/bots             Bot Workspace・Work/Bots 2 モードサイドバー・Bot 管理 MCP・Bot タスク自動タグと完了ウェイク・汎用コンテキストローテーション（bot-workspace-sidebar / bot-tasks-wakeup / bot-context-rotation を統合）
