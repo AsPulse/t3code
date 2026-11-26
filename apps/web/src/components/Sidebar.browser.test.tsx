@@ -2,9 +2,13 @@ import appCss from "../index.css?inline";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import * as shelfHooks from "../state/olderSettledShelf";
 import { createWorkspaceFocusController, workspaceAreaProps } from "../lib/workspaceFocus";
+import { buildBotWorkspaceIndex } from "@t3tools/client-runtime/state/bot-workspace";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
+  BotId,
+  BOT_TASK_TAG,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type LocalApi,
   ProjectId,
@@ -30,6 +34,7 @@ import { readLocalApi } from "../localApi";
 import type { Project } from "../types";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
+import { useBotWorkspaceIndex, useSidebarBotMode } from "./sidebar/sidebarBots";
 import { SortableThreadRow } from "./sidebar/SidebarThreadRow";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -42,6 +47,7 @@ vi.mock("../hooks/useHandleNewThread", { spy: true });
 vi.mock("../hooks/useNowMinute", { spy: true });
 vi.mock("../hooks/useThreadRouteTarget", { spy: true });
 vi.mock("./sidebar/SidebarThreadRow", { spy: true });
+vi.mock("./sidebar/sidebarBots", { spy: true });
 vi.mock("../state/session", { spy: true });
 vi.mock("../state/use-orchestration-command", { spy: true });
 vi.mock("../localApi", { spy: true });
@@ -357,6 +363,7 @@ describe("sidebar settled pagination", () => {
           activeProject.environmentId,
           {
             scratchWorkspaceRoot: null,
+            settings: DEFAULT_SERVER_SETTINGS,
             shellThreadFamilies: false,
           } as unknown as EnvironmentServerConfig,
         ],
@@ -396,4 +403,121 @@ describe("sidebar settled pagination", () => {
     await act(() => moreButton.click());
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
   });
+});
+
+describe("sidebar Bot Workspace", () => {
+  it.each([true, false])(
+    "routes bot rows only when a workspace is enabled (%s)",
+    async (enabled) => {
+      using stack = new DisposableStack();
+      const workProject = project("coding");
+      const botProject = project("bot-workspace");
+      const resident = threadShell(botProject.id, 1);
+      const secondary = threadShell(botProject.id, 2);
+      const workspaceThread = threadShell(botProject.id, 3);
+      const work = threadShell(workProject.id, 4);
+      const taggedTask = { ...threadShell(workProject.id, 5), tags: [BOT_TASK_TAG] };
+      vi.mocked(useProjects).mockReturnValue([workProject, botProject]);
+      vi.mocked(useQuietThreadShells).mockReturnValue([
+        resident,
+        secondary,
+        workspaceThread,
+        work,
+        taggedTask,
+      ]);
+      vi.mocked(useThreadRouteTarget).mockReturnValue(null);
+      vi.mocked(useHandleNewThread).mockReturnValue({
+        activeDraftThread: null,
+        activeThread: null,
+        defaultProjectRef: null,
+        defaultProjectFallbackReady: true,
+        handleNewThread: vi.fn().mockResolvedValue(null),
+        routeDraftId: null,
+        routeThreadRef: null,
+      });
+      vi.mocked(useBotWorkspaceIndex).mockReturnValue(
+        buildBotWorkspaceIndex(
+          enabled
+            ? [
+                {
+                  environmentId: botProject.environmentId,
+                  projectSettingsOverrides: {
+                    [botProject.id]: {
+                      botWorkspace: {
+                        enabled: true,
+                        bots: [
+                          {
+                            id: BotId.make("primary"),
+                            name: "Build bot",
+                            role: "primary",
+                            order: 0,
+                            threadId: resident.id,
+                          },
+                          {
+                            id: BotId.make("secondary"),
+                            name: "Review bot",
+                            role: "secondary",
+                            order: 1,
+                            threadId: secondary.id,
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              ]
+            : [],
+          botProject.environmentId,
+        ),
+      );
+      useSidebarBotMode.setState({ mode: enabled ? "work" : "bots" });
+      stack.defer(() => {
+        useSidebarBotMode.setState({ mode: "work" });
+        vi.mocked(useBotWorkspaceIndex).mockReset();
+      });
+      await using screen = await render(
+        <SidebarProvider>
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </SidebarProvider>,
+      );
+
+      await expect.element(screen.getByText(work.title, { exact: true })).toBeInTheDocument();
+      if (!enabled) {
+        await expect
+          .element(screen.getByRole("group", { name: "Sidebar mode" }))
+          .not.toBeInTheDocument();
+        await expect
+          .element(screen.getByText(taggedTask.title, { exact: true }))
+          .toBeInTheDocument();
+        await expect.element(screen.getByText(resident.title, { exact: true })).toBeInTheDocument();
+        return;
+      }
+
+      await expect.element(screen.getByRole("button", { name: "Build bot" })).toBeInTheDocument();
+      await expect
+        .element(screen.getByText(resident.title, { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(screen.getByText(workspaceThread.title, { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(screen.getByText(taggedTask.title, { exact: true }))
+        .not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Bots", exact: true }));
+      await expect
+        .element(screen.getByText(secondary.title, { exact: true }))
+        .not.toBeInTheDocument();
+      await expect.element(screen.getByText("Review bot", { exact: true })).toBeInTheDocument();
+      await expect
+        .element(screen.getByText(workspaceThread.title, { exact: true }))
+        .toBeInTheDocument();
+      await expect.element(screen.getByText(taggedTask.title, { exact: true })).toBeInTheDocument();
+      await expect.element(screen.getByText(work.title, { exact: true })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Work", exact: true }));
+      await expect.element(screen.getByText(work.title, { exact: true })).toBeInTheDocument();
+      await expect.element(screen.getByText("Review bot", { exact: true })).not.toBeInTheDocument();
+    },
+  );
 });

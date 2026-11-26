@@ -1065,6 +1065,15 @@ export function groupSidebarThreadsByProject<
   return folders.filter((folder) => folder.threads.length > 0 || keepEmpty(folder.group));
 }
 
+export function resolveBotMove(
+  botsMode: boolean,
+  kind: ReturnType<typeof import("@t3tools/client-runtime/state/bot-workspace").classifyThread>,
+) {
+  if (botsMode && kind === "bot-task") return "move-to-work";
+  if (!botsMode && kind === "work") return "move-to-bots";
+  return null;
+}
+
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"
