@@ -69,6 +69,7 @@ import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { SnoozePresetsRow } from "./SnoozePresetsSettings";
+import { DelegateRuntimeModeOverridesRow } from "./DelegateRuntimeModeOverridesSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { managedTelemetryOffMessage, usePrimaryManagedPolicy } from "../../state/managedPolicy";
 import {
@@ -1979,6 +1980,12 @@ export function ThreadsSettingsPanel() {
       </SettingsSection>
 
       <ProjectDefaultsSettings category="general" />
+
+      {!isProjectScope ? (
+        <SettingsSection id="delegation" title={gt("Delegation")}>
+          <DelegateRuntimeModeOverridesRow />
+        </SettingsSection>
+      ) : null}
 
       {!isProjectScope ? (
         <SettingsSection id="snooze" title={gt("Snooze")}>
