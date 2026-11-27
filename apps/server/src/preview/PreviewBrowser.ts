@@ -3,6 +3,7 @@ import * as EffectNodeStream from "@effect/platform-node/NodeStream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import type * as Duration from "effect/Duration";
@@ -441,6 +442,16 @@ export const makePreviewBrowser = Effect.fn("PreviewBrowser.make")(function* (
 export const layer = Layer.effect(
   PreviewBrowser,
   Effect.gen(function* () {
+    const executable = yield* Config.String("T3CODE_SERVER_BROWSER_EXECUTABLE").pipe(
+      Config.option,
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    if (Option.isSome(executable) && executable.value !== "") {
+      return PreviewBrowser.of({
+        executable: Effect.succeed(executable.value),
+        installed: Effect.succeedSome(executable.value),
+      });
+    }
     const config = yield* ServerConfig.ServerConfig;
     return yield* makePreviewBrowser({ baseDir: config.baseDir });
   }),

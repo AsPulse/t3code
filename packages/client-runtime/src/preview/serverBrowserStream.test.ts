@@ -81,12 +81,17 @@ describe("preview stream control", () => {
   it("keeps read-only frames flowing while refusing takeover and every mutation", () => {
     const { client, socket, onFrame } = connect();
     socket.control({ ...agent, canOperate: false });
+    socket.message(
+      JSON.stringify({ type: "extensions", extensions: [{ id: "probe", name: "Popup Probe" }] }),
+    );
+    socket.message(JSON.stringify({ type: "extensionPopup", open: true }));
     const frame = new ArrayBuffer(3);
     socket.message(frame);
     expect(onFrame).toHaveBeenCalledWith(frame);
     expect(client.send({ type: "takeControl" })).toBe(false);
     expect(client.send({ type: "resize", width: 390, height: 844 })).toBe(false);
     expect(client.send({ type: "reload" })).toBe(false);
+    expect(client.send({ type: "extensionAction", extensionId: "probe" })).toBe(false);
     expect(socket.sent).toEqual(['{"type":"ack"}']);
     client.stop();
   });
@@ -131,6 +136,38 @@ describe("preview stream control", () => {
     );
     restarted.stop();
     expect(onFileChooser).toHaveBeenLastCalledWith(null);
+  });
+
+  it("routes extension popup streams and decodes extension state", () => {
+    const onExtensions = vi.fn();
+    const onExtensionPopup = vi.fn();
+    const client = createPreviewStreamClient(
+      { ...target, extensionPopup: true },
+      {
+        onFrame: vi.fn(),
+        onViewport: vi.fn(),
+        onConnectedChange: vi.fn(),
+        onUnauthorized: vi.fn(),
+        onExtensions,
+        onExtensionPopup,
+      },
+    );
+    const socket = FakeSocket.current;
+    const extension = { id: "probe", name: "Popup Probe" };
+    expect(new URL(socket.url).searchParams.get("extensionPopup")).toBe("1");
+    socket.message(
+      JSON.stringify({ type: "extensions", extensions: [extension, { id: "invalid" }] }),
+    );
+    for (const open of [true, "invalid", false]) {
+      socket.message(JSON.stringify({ type: "extensionPopup", open }));
+    }
+    expect(onExtensions).toHaveBeenCalledExactlyOnceWith([extension]);
+    expect(onExtensionPopup.mock.calls).toEqual([[true], [false]]);
+    socket.control({ ...agent, controller: "you" });
+    const action = { type: "extensionAction", extensionId: extension.id } as const;
+    expect(client.send(action)).toBe(true);
+    expect(socket.sent).toEqual([JSON.stringify(action)]);
+    client.stop();
   });
 });
 

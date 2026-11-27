@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Preview from "../../../preview/Manager.ts";
+import { isExtensionUrl } from "../../../preview/ServerBrowserExtensions.ts";
 import { requireThreadMcpCapability } from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { unavailable } from "../../threadAccess.ts";
@@ -15,12 +16,15 @@ export const layer = McpToolAccess.toLayer(PreviewControlsToolkit, {
     Effect.gen(function* () {
       const { scope, manager } = yield* access;
       const result = yield* manager.list({ threadId: scope.thread.threadId });
+      const sessions = result.sessions.filter(
+        ({ navStatus }) => navStatus._tag === "Idle" || !isExtensionUrl(navStatus.url),
+      );
       const start = input.cursor ?? 0;
       const end = start + (input.limit ?? 20);
       return {
         ...result,
-        sessions: result.sessions.slice(start, end),
-        nextCursor: end < result.sessions.length ? end : null,
+        sessions: sessions.slice(start, end),
+        nextCursor: end < sessions.length ? end : null,
       };
     }),
   ),

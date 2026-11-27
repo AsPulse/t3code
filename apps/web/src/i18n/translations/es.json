@@ -6168,6 +6168,7 @@
   "7f5a37821edc1814": "Permitido",
   "86a2917f997a6e61": "Permitir",
   "40baaf84b74b6875": "No se pudieron comprobar los permisos. Lo volveremos a intentar automáticamente.",
+  "d722c2e5af559970": "Ventana emergente de la extensión del navegador",
   "1c0244f781a87ef2": "No se pudo actualizar la entrada de voz de la anotación",
   "53b9a6ba24deb0e7": "Navegación",
   "c85ddaab914c8e1a": "Atrás",
@@ -6205,6 +6206,7 @@
   "9a4b206f464e2a69": "Buscar en la página",
   "ca25cfeda6c731f5": "Recarga forzada",
   "7632e576bfdde552": "Abrir DevTools",
+  "3ee00b25e193ba8a": "Extensiones",
   "a1f05362e8741905": "Apariencia",
   "b9bc0e4256a4f6a5": "Zoom",
   "f63dd7b268afcf8d": [

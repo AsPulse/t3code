@@ -79,16 +79,42 @@ it.effect.each([
         ),
       ),
     );
+    const nextTab = projectAccess
+      ? yield* Effect.gen(function* () {
+          const extension = yield* manager.open({ threadId, runtime: "server" });
+          yield* manager.reportStatus({
+            threadId,
+            tabId: extension.tabId,
+            serverControlled: true,
+            canGoBack: false,
+            canGoForward: false,
+            navStatus: {
+              _tag: "Success",
+              url: "chrome-extension://test/welcome.html",
+              title: "Extension welcome",
+            },
+          });
+          return yield* manager.open({ threadId, url: "http://localhost:3001" });
+        })
+      : undefined;
     const listed = yield* toolkit
-      .handle("t3_preview_list", {})
+      .handle("t3_preview_list", { limit: 1 })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+    if (projectAccess) {
+      expect(listed.at(-1)?.result).toMatchObject({ sessions: [tab], nextCursor: 1 });
+      const last = yield* toolkit
+        .handle("t3_preview_list", { cursor: 1, limit: 1 })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect(last.at(-1)?.result).toMatchObject({ sessions: [nextTab], nextCursor: null });
+    }
     const closed = yield* toolkit
       .handle("t3_preview_close", { tabId: tab.tabId })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
     if (projectAccess) {
-      expect(listed.at(-1)?.result).toMatchObject({ sessions: [tab], nextCursor: null });
       expect(closed.at(-1)?.result).toEqual({});
-      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      expect((yield* manager.list({ threadId })).sessions.map(({ tabId }) => tabId)).not.toContain(
+        tab.tabId,
+      );
     } else {
       for (const result of [listed, closed]) {
         expect(result.at(-1)?.result).toMatchObject({
