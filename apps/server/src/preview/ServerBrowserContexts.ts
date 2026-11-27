@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import type { Browser, BrowserContext, CDPSession } from "playwright-core";
 
 import { sandboxDisabled } from "./PreviewBrowserHost.ts";
+import { extensionPaths, isExtensionUrl, loadExtensions } from "./ServerBrowserExtensions.ts";
 
 // Playwright needs its files on disk. createRequire also resolves it from a Node SEA executable.
 const requirePlaywright = NodeModule.createRequire(import.meta.url);
@@ -245,7 +246,11 @@ export class ServerBrowserContexts {
           if (this.contexts.get(key) === pending) this.contexts.delete(key);
           this.options.onContextClose?.(context);
         });
-        for (const page of context.pages()) await page.close().catch(constVoid);
+        for (const page of context.pages()) {
+          if (!isExtensionUrl(page.url())) {
+            await page.close().catch(constVoid);
+          }
+        }
         if (this.closing) {
           await context.close().catch(constVoid);
           throw new Error("The preview browser is closed.");
@@ -267,6 +272,11 @@ export class ServerBrowserContexts {
     const directory = this.profileDirectory(profileId);
     await NodeFSP.mkdir(directory, { recursive: true });
     const { executable, ...options } = await this.launchOptions();
+    const extensions = extensionPaths(options.env);
+    if (extensions.length > 0) {
+      options.args.push("--enable-unsafe-extension-debugging");
+      options.ignoreDefaultArgs.push("--disable-extensions");
+    }
     const { chromium } = loadPlaywright();
     const context = await this.launch(executable, (executablePath) =>
       chromium.launchPersistentContext(directory, {
@@ -276,6 +286,14 @@ export class ServerBrowserContexts {
       }),
     );
     stubWorkerBadges(context);
+    if (extensions.length > 0) {
+      try {
+        await loadExtensions(context, extensions);
+      } catch (cause) {
+        await context.close().catch(constVoid);
+        throw cause;
+      }
+    }
     return context;
   }
 

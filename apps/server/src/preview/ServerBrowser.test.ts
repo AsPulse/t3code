@@ -64,6 +64,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
         };
       }
       contexts.push(context);
+      if (isolationKey === undefined) extensionContextReady?.(context);
       return context as unknown as BrowserContext;
     }
     async scratchPage() {
@@ -176,6 +177,7 @@ function fileChooserElement(accept: string) {
 
 function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "about:blank") {
   const events = new NodeEvents.EventEmitter();
+  const contextEvents = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
@@ -207,6 +209,7 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
     setDefaultTimeout: vi.fn(),
     setDefaultNavigationTimeout: vi.fn(),
     context: () => context,
+    opener: vi.fn(async (): Promise<unknown> => null),
     mainFrame: () => page,
     frames: () => [page],
     url: () => url,
@@ -288,15 +291,26 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
       events.emit("dialog", dialog);
     }),
   };
+  const pages = [page];
   const context = {
     page,
     sessions,
     cssViewport,
+    on: (name: string, callback: (...args: unknown[]) => void) => contextEvents.on(name, callback),
+    emitAsync: (name: string, ...args: unknown[]) =>
+      Promise.all(contextEvents.listeners(name).map((listener) => listener(...args))),
+    pages: (): Array<typeof page> => pages.filter((candidate) => !candidate.isClosed()),
+    addPage: (candidate: typeof page) => {
+      candidate.context = () => context;
+      pages.push(candidate);
+    },
     newPage: async () => page as unknown as Page,
     grantPermissions: vi.fn(async () => {}),
     newCDPSession: async (target: unknown) => {
       const session = makeSession(
-        target === page ? undefined : (target as ReturnType<typeof makeFrame>),
+        pages.some((candidate) => candidate === target)
+          ? undefined
+          : (target as ReturnType<typeof makeFrame>),
         cssViewport,
       );
       sessions.push(session);
@@ -307,7 +321,7 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
       if (contextClosed) return;
       contextClosed = true;
       context.closing.resolve();
-      await page.close();
+      await Promise.all(pages.map((candidate) => candidate.close()));
       onClose?.(context as unknown as BrowserContext);
     }),
   };
@@ -390,6 +404,7 @@ function makeEncoderPage() {
 const contexts: ReturnType<typeof makeContext>[] = [];
 let encoderPageOverride: Page | undefined;
 let realContextOverride: BrowserContext | undefined;
+let extensionContextReady: ((context: ReturnType<typeof makeContext>) => void) | undefined;
 const encoderStreams: Array<{ frameRate: number | undefined; bitsPerSecond: number }> = [];
 let decodeGate: PromiseWithResolvers<void> | null = null;
 const contextRequests: Array<{ profileId: string; isolated: boolean }> = [];
@@ -595,6 +610,7 @@ beforeEach(() => {
   contexts.length = 0;
   encoderPageOverride = undefined;
   realContextOverride = undefined;
+  extensionContextReady = undefined;
   encoderStreams.length = 0;
   decodeGate = null;
   contextRequests.length = 0;
@@ -4192,6 +4208,136 @@ it.effect("a popup opens in its opener's appearance", () =>
       expect(event.snapshot.colorScheme).toBe("dark");
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([true, false])(
+  "opens extension pages for the user (before first tab: %s)",
+  (early) =>
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      const welcomeUrl = "chrome-extension://test/welcome.html";
+      const welcome = makeContext(undefined, welcomeUrl).page;
+      extensionContextReady = (context) => {
+        if (!early) return;
+        context.addPage(welcome);
+        const setSize = context.page.setViewportSize.getMockImplementation()!;
+        context.page.setViewportSize.mockImplementationOnce(async (size) => {
+          await context.emitAsync("page", welcome);
+          await setSize(size);
+        });
+      };
+      yield* Effect.yieldNow;
+      const events = yield* manager.subscribeEvents;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { profileId: "default", show: false },
+      });
+      const homeId = PreviewTabId.make(opened.tabId!);
+      const context = contexts[0]!;
+      const notifiedTabId = early
+        ? undefined
+        : yield* Effect.scoped(
+            Effect.gen(function* () {
+              const viewer = yield* browser.attachViewer(viewerInput(homeId, true));
+              yield* viewer.input({ type: "takeControl" });
+              context.addPage(welcome);
+              yield* Effect.promise(() => context.emitAsync("page", welcome));
+              let message = yield* Queue.take(viewer.output);
+              while (message._tag !== "popup") message = yield* Queue.take(viewer.output);
+              return message.tabId;
+            }),
+          );
+      let loaded = yield* PubSub.take(events);
+      while (
+        loaded.type !== "navigated" ||
+        loaded.snapshot.navStatus._tag !== "Success" ||
+        loaded.snapshot.navStatus.url !== welcomeUrl
+      ) {
+        loaded = yield* PubSub.take(events);
+      }
+      const tabId = PreviewTabId.make(loaded.tabId);
+      if (!early) expect(notifiedTabId).toBe(tabId);
+      expect(loaded.threadId).toBe(scope.thread.threadId);
+      expect(loaded.snapshot.profileId).toBe("default");
+      expect(loaded.snapshot).not.toHaveProperty("automationOwner");
+      expect(loaded.snapshot).not.toHaveProperty("reveal", false);
+      const denied = {
+        _tag: "PreviewAutomationExecutionError",
+        reason: expect.stringContaining("preview_open"),
+      };
+      for (const operation of ["status", "open", "snapshot"] as const) {
+        expect(
+          yield* broker.invoke<void>({ scope, tabId, operation, input: {} }).pipe(Effect.flip),
+        ).toMatchObject(denied);
+      }
+      const status = broker.invoke<PreviewAutomationStatus>({
+        scope: asSession("unassigned"),
+        operation: "status",
+        input: {},
+      });
+      expect(yield* status).toMatchObject({
+        tabId: homeId,
+        tabs: [expect.objectContaining({ tabId: homeId })],
+      });
+
+      const child = makeContext(undefined, "chrome-extension://test/child.html").page;
+      child.opener.mockResolvedValue(welcome);
+      context.addPage(child);
+      yield* Effect.promise(() =>
+        Promise.all([context.emitAsync("page", child), welcome.emitAsync("popup", child)]),
+      );
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(3);
+      const childTabId = PreviewTabId.make(
+        sessions.find((session) => session.tabId !== homeId && session.tabId !== tabId)!.tabId,
+      );
+      child.commit("https://example.test/");
+      expect(
+        yield* broker
+          .invoke<void>({ scope, tabId: childTabId, operation: "status", input: {} })
+          .pipe(Effect.flip),
+      ).toMatchObject(denied);
+      yield* broker.invoke({ scope, tabId: homeId, operation: "close", input: {} });
+      expect(welcome.isClosed()).toBe(false);
+      expect(yield* status).toMatchObject({ available: false, tabId: null });
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect("blocks the next operation after an agent navigates to an extension", () =>
+  Effect.gen(function* () {
+    const { broker, tabId } = yield* ready;
+    const { page, sessions } = contexts[0]!;
+    const cdp = sessions[0]!;
+    const extensionUrl = "chrome-extension://test/inline.html";
+    const expression = `location.href = ${JSON.stringify(extensionUrl)}`;
+    const send = cdp.send.getMockImplementation()!;
+    cdp.send.mockImplementation((method, input) => {
+      if (
+        method === "Runtime.evaluate" &&
+        (input as { expression: string }).expression === expression
+      ) {
+        page.commit(extensionUrl);
+      }
+      return send(method, input);
+    });
+    yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression } });
+    expect(
+      yield* broker
+        .invoke<void>({
+          scope,
+          tabId,
+          operation: "evaluate",
+          input: { expression: "document.title" },
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({
+      _tag: "PreviewAutomationExecutionError",
+      reason: expect.stringContaining("preview_open"),
+    });
+  }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
 it.live("a page's title change without navigation reaches its session", () =>

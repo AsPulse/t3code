@@ -188,13 +188,81 @@ describe("ServerBrowserContexts", () => {
     expect(await pool.contextFor("work/team", "agent")).not.toBe(persistent);
     expect(launches.persistent).toHaveBeenCalledExactlyOnceWith(
       "/test/profiles/work%2Fteam",
-      expect.objectContaining({ chromiumSandbox: true, executablePath: "/test/chromium-launcher" }),
+      expect.objectContaining({
+        args: expect.not.arrayContaining(["--enable-unsafe-extension-debugging"]),
+        ignoreDefaultArgs: ["--enable-automation"],
+        chromiumSandbox: true,
+        executablePath: "/test/chromium-launcher",
+      }),
     );
     expect(release).toHaveBeenCalledTimes(2);
     expect(launches.mkdir).toHaveBeenCalledWith("/test/profiles/work%2Fteam", { recursive: true });
     await pool.close();
     expect(human.close).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    "loads extensions only into persistent profiles (load fails: %s)",
+    async (fails) => {
+      const startup = { url: () => "about:blank", close: vi.fn(async () => {}) };
+      const welcome = {
+        url: () => "chrome-extension://test/welcome.html",
+        close: vi.fn(async () => {}),
+      };
+      const send = vi.fn(async (_method: string, { path }: { path: string }) => {
+        if (fails && path === "/test/second") throw new Error("Invalid manifest");
+        return { id: "test" };
+      });
+      const session = { send, detach: vi.fn(async () => {}) };
+      const persistent = Object.assign(makeContext(), {
+        pages: () => [startup, welcome],
+        browser: () => ({ newBrowserCDPSession: async () => session }),
+      });
+      launches.persistent.mockResolvedValue(persistent as unknown as BrowserContext);
+      launches.launch.mockResolvedValue(makeBrowser() as unknown as Browser);
+      const pool = new ServerBrowserContexts({
+        ...options(),
+        env: {
+          T3CODE_SERVER_BROWSER_EXTENSIONS: ["/test/first", "", "/test/second"].join(
+            NodePath.delimiter,
+          ),
+        },
+      });
+      try {
+        await pool.contextFor(INCOGNITO_BROWSER_PROFILE_ID);
+        expect(launches.launch).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            args: expect.not.arrayContaining(["--enable-unsafe-extension-debugging"]),
+            ignoreDefaultArgs: ["--enable-automation"],
+          }),
+        );
+        const loading = pool.contextFor("work");
+        if (fails) {
+          await expect(loading).rejects.toThrow("Could not load browser extension at /test/second");
+          expect(persistent.isClosed()).toBe(true);
+        } else {
+          expect(await loading).toBe(persistent);
+          expect(startup.close).toHaveBeenCalledOnce();
+          expect(welcome.close).not.toHaveBeenCalled();
+          expect(persistent.isClosed()).toBe(false);
+        }
+        expect(launches.persistent).toHaveBeenCalledExactlyOnceWith(
+          "/test/profiles/work",
+          expect.objectContaining({
+            args: expect.arrayContaining(["--enable-unsafe-extension-debugging"]),
+            ignoreDefaultArgs: ["--enable-automation", "--disable-extensions"],
+          }),
+        );
+        expect(send.mock.calls).toEqual([
+          ["Extensions.loadUnpacked", { path: "/test/first" }],
+          ["Extensions.loadUnpacked", { path: "/test/second" }],
+        ]);
+        expect(session.detach).toHaveBeenCalledOnce();
+      } finally {
+        await pool.close();
+      }
+    },
+  );
 
   it("diagnoses a launcher failure against the real executable", async () => {
     const diagnosed = new Error("diagnosed");

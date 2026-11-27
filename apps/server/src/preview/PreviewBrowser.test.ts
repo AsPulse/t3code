@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Layer from "effect/Layer";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Digest from "effect/crypto/Digest";
 import type * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
@@ -15,6 +16,7 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NodeZlib from "node:zlib";
 
+import * as ServerConfig from "../config.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 // NTFS cannot enforce POSIX modes; choose the host platform.
@@ -124,6 +126,34 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
 });
 
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("PreviewBrowser", (it) => {
+  it.effect("uses the configured executable without installing a browser", () => {
+    const executable = "/test/google-chrome";
+    return Effect.gen(function* () {
+      const browser = yield* PreviewBrowser.PreviewBrowser;
+      expect(yield* browser.installed).toEqual(Option.some(executable));
+      expect(yield* browser.executable).toBe(executable);
+    }).pipe(
+      Effect.provide(
+        PreviewBrowser.layer.pipe(
+          Layer.provide(
+            Layer.merge(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-browser-test-" }),
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { T3CODE_SERVER_BROWSER_EXECUTABLE: executable } }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      Effect.provideService(HostProcess.Platform, hostPlatform),
+      Effect.provideService(HostProcess.Architecture, "x64"),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Unexpected download")),
+      ),
+    );
+  });
+
   it.effect.each(["0.8.0", "1.2.3"])("retains another version when installing %s", (current) =>
     Effect.gen(function* () {
       const { browser, fs, path, installRoot, requests } = yield* makeHarness({ version: current });
