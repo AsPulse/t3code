@@ -1,6 +1,13 @@
 import "~/index.css";
 import * as DateTime from "effect/DateTime";
-import { EnvironmentId, NodeId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  NodeId,
+  ProviderDriverKind,
+  ThreadId,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
@@ -11,9 +18,13 @@ import "~/index.css";
 const state = vi.hoisted(() => ({
   projection: null as unknown,
   commandSucceeds: false,
+  command: vi.fn(),
+  canStopWorkflow: false,
   relatedShells: [] as unknown[],
   threadTitles: {} as Record<string, string>,
   archivedThreads: [] as unknown[],
+  childProjections: new Map<string, unknown>(),
+  projectionReads: new Set<string>(),
 }));
 
 vi.mock(import("../../state/query"), async (original) => ({
@@ -26,17 +37,26 @@ vi.mock(import("../../state/query"), async (original) => ({
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
-  useAtomValue: (() => false) as never,
+  useAtomValue: (() => state.canStopWorkflow) as never,
 }));
 
 vi.mock(import("../../state/entities"), () => ({
   useQuietThreadShell: (() => null) as never,
-  useQuietThreadProjection: ((ref: unknown) =>
-    ref === null ? null : { projection: state.projection }) as never,
+  useQuietThreadProjection: ((ref: { threadId: string } | null) => {
+    if (ref === null) return null;
+    state.projectionReads.add(ref.threadId);
+    const projection =
+      state.childProjections.get(ref.threadId) ??
+      ((state.projection as { thread: { id: string } } | null)?.thread.id === ref.threadId
+        ? state.projection
+        : null);
+    return projection === null ? null : { projection };
+  }) as never,
   useThreadRelationshipShells: (() =>
     state.projection === null
       ? []
       : [(state.projection as { thread: unknown }).thread, ...state.relatedShells]) as never,
+  useSubagentDescendantShells: (() => state.relatedShells) as never,
   useProjects: (() => []) as never,
   useHiddenThreadKeys: (() => new Set()) as never,
   useAnyEnvironmentHiding: (() => false) as never,
@@ -51,16 +71,19 @@ vi.mock(import("../../lib/archivedThreadsState"), () => ({
   })) as never,
 }));
 vi.mock(import("../../state/use-atom-command"), () => ({
-  useAtomCommand: (() => async () =>
-    state.commandSucceeds
+  useAtomCommand: (() => async (value: unknown) => {
+    state.command(value);
+    return state.commandSucceeds
       ? AsyncResult.success(undefined)
-      : AsyncResult.failure(Cause.fail(new Error("Connection lost")))) as never,
+      : AsyncResult.failure(Cause.fail(new Error("Connection lost")));
+  }) as never,
 }));
 
 import { render } from "../../../test/render";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { ScrollArea } from "../ui/scroll-area";
 import { ToastProvider } from "../ui/toast";
+import { threadFamilies } from "../../state/threads";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 const environmentId = EnvironmentId.make("environment");
@@ -68,9 +91,13 @@ const threadId = ThreadId.make("fork");
 
 function setup() {
   state.commandSucceeds = false;
+  state.command.mockReset();
+  state.canStopWorkflow = false;
   state.relatedShells = [];
   state.threadTitles = { source: "Source" };
   state.archivedThreads = [];
+  state.childProjections.clear();
+  state.projectionReads.clear();
   state.projection = {
     thread: {
       id: threadId,
@@ -86,6 +113,268 @@ function setup() {
     providerSessions: [{ id: "session", status: "ready" }],
   };
 }
+
+function setupSubagentTree(
+  childStatus: "running" | "completed",
+  grandchildStatus?: "running" | "completed",
+) {
+  setup();
+  const projection = makeThreadProjectionFixture();
+  const childId = ThreadId.make("child");
+  const grandchildId = ThreadId.make("grandchild");
+  const child = {
+    ...projection.thread,
+    id: childId,
+    title: "Child agent",
+    lineage: {
+      rootThreadId: projection.thread.id,
+      parentThreadId: projection.thread.id,
+      relationshipToParent: "subagent" as const,
+    },
+    status: childStatus,
+  };
+  const grandchild = {
+    ...child,
+    id: grandchildId,
+    title: "Grandchild agent",
+    lineage: { ...child.lineage, parentThreadId: childId },
+    status: grandchildStatus,
+  };
+  const projectedChild = runningSubagent(projection.thread, childId);
+  const projectedGrandchild = runningSubagent(child, grandchildId);
+  const rootProjection = {
+    ...projection,
+    subagents: [{ ...projectedChild, status: childStatus }],
+  };
+  const childProjection = {
+    ...projection,
+    thread: child,
+    subagents:
+      grandchildStatus === undefined ? [] : [{ ...projectedGrandchild, status: grandchildStatus }],
+  };
+  state.projection = rootProjection;
+  state.childProjections.set(childId, childProjection);
+  state.relatedShells = grandchildStatus === undefined ? [child] : [child, grandchild];
+  return { rootId: projection.thread.id, childProjection, rootProjection };
+}
+
+function runningSubagent(
+  owner: OrchestrationV2ThreadProjection["thread"],
+  childThreadId: ThreadId,
+): OrchestrationV2Subagent {
+  return {
+    id: NodeId.make(`agent-${childThreadId}`),
+    threadId: owner.id,
+    runId: null,
+    parentNodeId: NodeId.make("parent"),
+    origin: "app_owned",
+    createdBy: "agent",
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: owner.providerInstanceId,
+    providerThreadId: null,
+    childThreadId,
+    nativeTaskRef: null,
+    prompt: "Inspect the change",
+    title: null,
+    model: "fixture-model",
+    status: "running",
+    result: null,
+    startedAt: owner.updatedAt,
+    completedAt: null,
+    updatedAt: owner.updatedAt,
+  };
+}
+
+it("opens a running grandchild from its parent's nested list", async () => {
+  const { rootId } = setupSubagentTree("running", "running");
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+    { router: `/environment/${rootId}` },
+  );
+
+  const child = screen.getByRole("button", { name: /^Child agent/ });
+  const grandchild = screen.getByRole("button", { name: /^Grandchild agent/ });
+  await expect.element(grandchild).toBeVisible();
+  expect(child.element().closest("li")?.contains(grandchild.element())).toBe(true);
+  expect(
+    grandchild.element().getBoundingClientRect().left -
+      child.element().getBoundingClientRect().left,
+  ).toBe(16);
+  expect(state.projectionReads).toEqual(new Set([rootId, "child"]));
+  await grandchild.click();
+  await vi.waitFor(() =>
+    expect(screen.router?.state.location.pathname).toBe("/environment/grandchild"),
+  );
+});
+
+it("holds the thread family, which brings in idle subagents, only while the lineage shows", async () => {
+  const { rootId } = setupSubagentTree("completed", "completed");
+  const release = vi.fn();
+  using mount = vi.spyOn(threadFamilies, "mount").mockReturnValue(release);
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage={false}
+      showSideChats={false}
+    />,
+  );
+  expect(mount).not.toHaveBeenCalled();
+  await screen.rerender(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+  );
+  expect(mount).toHaveBeenCalledExactlyOnceWith(expect.anything(), environmentId, rootId);
+  await screen.unmount();
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it("keeps a completed subtree collapsed with its descendant count until expanded", async () => {
+  const { rootId } = setupSubagentTree("completed", "completed");
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+  );
+
+  await screen.getByRole("button", { name: /Previous agents/ }).click();
+  const toggle = screen.getByRole("button", { name: "Expand Child agent" });
+  const grandchild = screen.getByRole("button", { name: /Grandchild agent/ });
+  await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect.element(screen.getByRole("button", { name: /Child agent.*1/ })).toBeVisible();
+  await expect.element(grandchild).not.toBeInTheDocument();
+  expect(state.projectionReads).toEqual(new Set([rootId]));
+  await toggle.click();
+  await expect.element(grandchild).toBeVisible();
+  await screen.getByRole("button", { name: "Collapse Child agent" }).click();
+  await expect.element(grandchild).not.toBeInTheDocument();
+});
+
+it("keeps a completed child with a running grandchild out of Previous agents", async () => {
+  const { rootId } = setupSubagentTree("completed", "running");
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+  );
+
+  await expect.element(screen.getByText("Lineage · 1 running", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: /^Child agent/ })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: /Previous agents/ }))
+    .not.toBeInTheDocument();
+});
+
+it("keeps the original icon inset when all direct children are leaves", async () => {
+  const { rootId } = setupSubagentTree("running");
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+  );
+
+  const child = screen.getByRole("button", { name: /^Child agent/ });
+  await expect.element(child).toBeVisible();
+  const button = child.element();
+  const style = getComputedStyle(button);
+  expect(button.querySelector("svg")?.getBoundingClientRect().left).toBe(
+    button.getBoundingClientRect().left +
+      parseFloat(style.paddingInlineStart) +
+      parseFloat(style.borderInlineStartWidth),
+  );
+  expect(state.projectionReads).toEqual(new Set([rootId]));
+});
+
+it("uses each launching thread for stop and keeps rich hover content on the direct child", async () => {
+  const { rootId } = setupSubagentTree("running", "running");
+  state.commandSucceeds = true;
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={rootId}
+      showLineage
+      showSideChats={false}
+    />,
+  );
+
+  await userEvent.hover(screen.getByRole("button", { name: /^Child agent/ }));
+  await expect.element(page.getByText("fixture-model", { exact: true })).toBeVisible();
+  await screen.getByRole("button", { name: "Stop subagent Child agent" }).click();
+
+  await userEvent.hover(screen.getByRole("button", { name: /^Grandchild agent/ }));
+  await expect.element(page.getByText("Open subagent in this chat", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("fixture-model", { exact: true })).not.toBeInTheDocument();
+  await screen.getByRole("button", { name: "Stop subagent Grandchild agent" }).click();
+  expect(state.command.mock.calls).toEqual([
+    [{ environmentId, input: { threadId: rootId, subagentId: "agent-child" } }],
+    [{ environmentId, input: { threadId: "child", subagentId: "agent-grandchild" } }],
+  ]);
+});
+
+it.each(["direct", "nested"] as const)(
+  "preserves %s workflow controls and members",
+  async (depth) => {
+    const { rootId, rootProjection, childProjection } = setupSubagentTree("running", "running");
+    const owner = depth === "direct" ? rootProjection : childProjection;
+    const coordinatorId =
+      depth === "direct" ? childProjection.thread.id : ThreadId.make("grandchild");
+    const workflow = {
+      ...runningSubagent(owner.thread, coordinatorId),
+      title: "Inspect changes",
+      driver: ProviderDriverKind.make("claudeAgent"),
+      origin: "provider_native",
+      workflow: {
+        name: "Inspect changes",
+        phases: [{ index: 0, title: "Review" }],
+        agents: [{ index: 0, label: "Review agent", state: "running", phaseIndex: 0 }],
+      },
+    } as const;
+    const projection = { ...owner, subagents: [workflow] };
+    if (depth === "direct") state.projection = projection;
+    else state.childProjections.set(owner.thread.id, projection);
+    state.canStopWorkflow = true;
+    state.commandSucceeds = true;
+    await using screen = await render(
+      <ThreadRelationshipsPanel
+        environmentId={environmentId}
+        threadId={rootId}
+        showLineage
+        showSideChats={false}
+      />,
+    );
+
+    await screen.getByRole("button", { name: "Expand Inspect changes" }).click();
+    await expect
+      .element(screen.getByRole("button", { name: "Open Review agent chat" }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByRole("button", { name: /^Grandchild agent/ }))
+      .not.toBeInTheDocument();
+    await userEvent.hover(screen.getByRole("button", { name: /^Inspect changes/ }));
+    await screen.getByRole("button", { name: "Stop workflow Inspect changes" }).click();
+    expect(state.command.mock.calls).toEqual([
+      [{ environmentId, input: { threadId: owner.thread.id, subagentId: workflow.id } }],
+    ]);
+  },
+);
 
 it.each([
   ["merge", "Could not merge back"],

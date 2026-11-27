@@ -7,10 +7,58 @@ import {
   immediateThreadRelationships,
   orderWebThreadLineageRows,
   resolveMergeBackTargetThreadId,
+  summarizeSubagentBranches,
   threadRelationshipRowStatus,
 } from "./threadRelationships.ts";
 
 describe("thread relationships", () => {
+  it("counts only reachable, visible and unarchived subagents through a cycle", () => {
+    const root = ThreadId.make("root");
+    const child = ThreadId.make("child");
+    const grandchild = ThreadId.make("grandchild");
+    const hidden = ThreadId.make("hidden");
+    const shell = (id: ThreadId, parentThreadId: ThreadId, status = "running") => ({
+      id,
+      status,
+      lineage: { parentThreadId, relationshipToParent: "subagent" },
+    });
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        shell(root, grandchild),
+        shell(child, root, "completed"),
+        shell(grandchild, child, "completed"),
+        { ...shell(ThreadId.make("deep"), grandchild, "completed"), activityRunStatus: "running" },
+        shell(hidden, child),
+        shell(ThreadId.make("hidden-descendant"), hidden),
+        {
+          ...shell(ThreadId.make("archived"), child),
+          archivedAt: DateTime.makeUnsafe("2026-06-01"),
+        },
+        {
+          ...shell(ThreadId.make("fork"), child),
+          lineage: { parentThreadId: child, relationshipToParent: "fork" },
+        },
+      ] as never,
+      projection: null,
+    });
+    const branches = summarizeSubagentBranches({
+      graph,
+      threadId: root,
+      excludedThreadIds: new Set(),
+      isHidden: (id) => id === hidden,
+    });
+    expect(branches.get(child)).toEqual({
+      descendantCount: 2,
+      runningCount: 1,
+      hasActiveDescendants: true,
+    });
+    expect(branches.get(grandchild)).toEqual({
+      descendantCount: 1,
+      runningCount: 1,
+      hasActiveDescendants: true,
+    });
+  });
+
   it.each([
     ["running", "completed"],
     ["completed", "running"],
