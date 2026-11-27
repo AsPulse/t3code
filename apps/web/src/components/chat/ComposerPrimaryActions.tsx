@@ -60,6 +60,8 @@ interface ComposerPrimaryActionsProps {
   preserveComposerFocusOnPointerDown?: boolean;
   isEditingQueuedMessage?: boolean;
   onSubmitMessage?: MouseEventHandler<HTMLButtonElement>;
+  /** Opens the Queue/Steer menu from the send button's context menu while a turn runs. */
+  onChooseFollowUpAction?: MouseEventHandler<HTMLButtonElement>;
   onResume?: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -252,6 +254,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   preserveComposerFocusOnPointerDown = false,
   isEditingQueuedMessage = false,
   onSubmitMessage,
+  onChooseFollowUpAction,
   onResume,
   onPreviousPendingQuestion,
   onInterrupt,
@@ -422,13 +425,21 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             shortcut: alternateShortcutLabel,
           })
         : gt("Click to queue, {modifier}-click to steer", { modifier });
+  const offersFollowUpChoice =
+    isRunning && !isEditingQueuedMessage && canSteer && !showResume && !compactsBeforeSend;
+  const followUpMenuHandler = offersFollowUpChoice ? onChooseFollowUpAction : undefined;
   const submitTooltip =
     submitStatus ??
-    (compactsBeforeSend
-      ? gt("Summarize {tokens} tokens of history, then send", { tokens: compactTokens })
-      : isRunning && !isEditingQueuedMessage && canSteer
-        ? dispatchTooltip
-        : submitLabel);
+    (compactsBeforeSend ? (
+      gt("Summarize {tokens} tokens of history, then send", { tokens: compactTokens })
+    ) : offersFollowUpChoice ? (
+      <>
+        <div>{dispatchTooltip}</div>
+        {followUpMenuHandler ? <div>{gt("Right-click to choose Queue or Steer")}</div> : null}
+      </>
+    ) : (
+      submitLabel
+    ));
 
   const sendButton = (
     <button
@@ -448,6 +459,17 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         if (showResume) onResume?.();
         else onSubmitMessage?.(event);
       }}
+      onContextMenu={
+        followUpMenuHandler
+          ? (event) => {
+              if (stopPhase === "landed") {
+                event.preventDefault();
+                return;
+              }
+              followUpMenuHandler(event);
+            }
+          : undefined
+      }
       disabled={
         isSendBusy ||
         isSendDisabled ||
