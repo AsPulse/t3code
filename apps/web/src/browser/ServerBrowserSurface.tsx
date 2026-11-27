@@ -53,6 +53,7 @@ export interface ServerBrowserHandle {
   readonly stopLoading: () => void;
   readonly viewport: (setting: PreviewViewportSetting) => void;
   readonly extensionAction: (id: string) => void;
+  readonly closeExtensionPopup: () => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
 
@@ -338,6 +339,7 @@ export function ServerBrowserSurface(props: {
       stopLoading: () => send({ type: "stopLoading" }),
       viewport: (setting) => send({ type: "viewport", setting }),
       extensionAction: (extensionId) => send({ type: "extensionAction", extensionId }),
+      closeExtensionPopup: () => send({ type: "closeExtensionPopup" }),
       canvas: () => (!pdfUrl && hasFrameRef.current ? canvasRef.current : null),
     }),
     [pdfUrl, send],

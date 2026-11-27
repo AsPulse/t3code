@@ -44,6 +44,7 @@ import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { readComposerImageBytes } from "../chat/composerAttachmentFiles";
 import { ensureLocalApi } from "~/localApi";
 import { getClientSettings } from "~/hooks/useSettings";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import {
   rememberPreviewUrl,
   updatePreviewServerSnapshot,
@@ -234,6 +235,9 @@ export function PreviewView({
   const isServerTab = snapshot?.runtime === "server" && !nativeServerTab;
   const serverOwnsRendering = snapshot?.runtime === "server";
   const serverSurfaceRef = useRef<ServerBrowserHandle | null>(null);
+  const closeExtensionPopup = useStableCallback(() =>
+    serverSurfaceRef.current?.closeExtensionPopup(),
+  );
   const serverSurfaceBoxRef = useRef<HTMLDivElement | null>(null);
   const [serverAspectRatioLocked, setServerAspectRatioLocked] = useState(false);
   const [serverToolbarWidth, setServerToolbarWidth] = useState(0);
@@ -1171,6 +1175,7 @@ export function PreviewView({
                   threadId={threadRef.threadId}
                   tabId={snapshot.tabId}
                   visible={visible}
+                  onClose={serverInputDisabled ? undefined : closeExtensionPopup}
                 />
               ) : null}
             </div>

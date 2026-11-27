@@ -68,6 +68,7 @@ const MenuTriggerButton = () => {
       <TooltipTrigger
         render={
           <MenuTrigger
+            data-extension-popup-anchor=""
             render={
               <Button
                 variant="ghost"
@@ -108,7 +109,7 @@ export function PreviewMoreMenu({
   return (
     <Menu>
       <MenuTriggerButton />
-      <MenuPopup align="end" sideOffset={6}>
+      <MenuPopup align="end" sideOffset={6} data-extension-popup-anchor="">
         {actions.find ? (
           <MenuItem onClick={actions.find} disabled={disabled}>
             <T>Find on page</T>
@@ -136,7 +137,7 @@ export function PreviewMoreMenu({
             <MenuSubTrigger disabled={disabled || extensions.disabled}>
               <T>Extensions</T>
             </MenuSubTrigger>
-            <MenuSubPopup>
+            <MenuSubPopup data-extension-popup-anchor="">
               {extensions.items.map(({ id, name }) => (
                 <MenuItem key={id} onClick={() => extensions.onAction(id)}>
                   {name}

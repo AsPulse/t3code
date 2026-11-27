@@ -99,6 +99,7 @@ export type PreviewStreamInput =
   | { readonly type: "reload"; readonly ignoreCache?: boolean }
   | { readonly type: "stopLoading" }
   | { readonly type: "extensionAction"; readonly extensionId: string }
+  | { readonly type: "closeExtensionPopup" }
   | { readonly type: "probe"; readonly x: number; readonly y: number };
 
 export interface PreviewStreamExtension {

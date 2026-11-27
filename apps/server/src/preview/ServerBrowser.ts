@@ -3043,11 +3043,16 @@ const make = Effect.gen(function* () {
   };
 
   const openExtensionPopup = async (tab: ServerTab, extensionId: string) => {
+    const key = tabKey(tab.threadId, tab.tabId);
+    const current = extensionPopups.get(key);
+    if (current?.url().startsWith(`chrome-extension://${extensionId}/`)) {
+      void current.close().catch(constVoid);
+      return;
+    }
     const popup = await triggerExtensionAction(tab.page.context(), tab.page, extensionId, (page) =>
       adoptedBrowserPages.add(page),
     );
     if (!popup || popup.isClosed()) return;
-    const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) {
       await popup.close();
       return;
@@ -3095,6 +3100,9 @@ const make = Effect.gen(function* () {
         }
         return;
       }
+      case "closeExtensionPopup":
+        void extensionPopups.get(tabKey(tab.threadId, tab.tabId))?.close().catch(constVoid);
+        return;
       case "mouse": {
         const action = message.action;
         const type =

@@ -4314,7 +4314,7 @@ it.effect.each([true, false])(
 );
 
 it.effect(
-  "only the controlling viewer can open an installed extension popup, outside the tab list",
+  "only the controlling viewer can open and close an installed extension popup outside the tab list",
   () =>
     Effect.gen(function* () {
       const { browser, broker, tabId } = yield* ready;
@@ -4324,12 +4324,12 @@ it.effect(
       using _extensions = vi
         .spyOn(ServerBrowserExtensions, "contextExtensions")
         .mockReturnValue([extension]);
-      const popup = makeContext(undefined, "chrome-extension://test/popup.html").page;
       const attaching = Promise.withResolvers<void>();
       using trigger = vi
         .spyOn(ServerBrowserExtensionPopup, "triggerExtensionAction")
         .mockImplementation(async (_context, _page, _id, excludeFromTabAdoption) => {
           await attaching.promise;
+          const popup = makeContext(undefined, "chrome-extension://test/popup.html").page;
           context.addPage(popup);
           const page = popup as unknown as Page;
           excludeFromTabAdoption(page);
@@ -4373,8 +4373,12 @@ it.effect(
       });
       expect(status.tabs?.map((tab) => tab.tabId)).toEqual([tabId]);
 
+      const closePopup = { type: "closeExtensionPopup" };
+      yield* other.input(closePopup);
+      yield* readOnly.input(closePopup);
       const attached = yield* browser.attachExtensionPopupViewer(viewerInput(tabId, true));
-      yield* Effect.promise(() => popup.close());
+      yield* controlling.input(action);
+      expect(trigger).toHaveBeenCalledOnce();
       yield* nextPopup(controlling, false);
       expect(
         yield* Queue.take(attached.output).pipe(
@@ -4384,6 +4388,12 @@ it.effect(
       expect(
         yield* browser.attachExtensionPopupViewer(viewerInput(tabId, true)).pipe(Effect.flip),
       ).toBeInstanceOf(ServerBrowser.ServerBrowserTabNotFoundError);
+
+      yield* controlling.input(action);
+      expect(trigger).toHaveBeenCalledTimes(2);
+      yield* nextPopup(controlling, true);
+      yield* controlling.input(closePopup);
+      yield* nextPopup(controlling, false);
     }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
