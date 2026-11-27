@@ -152,6 +152,60 @@ export function immediateThreadRelationships(
   return rows;
 }
 
+export interface SubagentBranchSummary {
+  readonly descendantCount: number;
+  readonly runningCount: number;
+  readonly hasActiveDescendants: boolean;
+}
+
+export function summarizeSubagentBranches(input: {
+  readonly graph: ThreadRelationshipGraph;
+  readonly threadId: ThreadId;
+  readonly excludedThreadIds: ReadonlySet<ThreadId>;
+  readonly isHidden: (threadId: ThreadId) => boolean;
+}): ReadonlyMap<ThreadId, SubagentBranchSummary> {
+  const children = new Map<ThreadId, OrchestrationV2ThreadShell[]>();
+  for (const edge of input.graph.edges) {
+    if (edge.kind !== "subagent") continue;
+    const shell = input.graph.nodes.get(edge.targetThreadId)?.thread;
+    if (!shell || shell.archivedAt != null || shell.lineage.sideChat || input.isHidden(shell.id))
+      continue;
+    const siblings = children.get(edge.sourceThreadId);
+    if (siblings) siblings.push(shell);
+    else children.set(edge.sourceThreadId, [shell]);
+  }
+
+  const visited = new Set([...input.excludedThreadIds, input.threadId]);
+  const branches = new Map<ThreadId, SubagentBranchSummary>();
+  const reachable: Array<{ parent: ThreadId; shell: OrchestrationV2ThreadShell }> = [];
+  const visitChildren = (parent: ThreadId) => {
+    for (const shell of children.get(parent) ?? []) {
+      if (visited.has(shell.id)) continue;
+      visited.add(shell.id);
+      reachable.push({ parent, shell });
+    }
+  };
+  visitChildren(input.threadId);
+  for (const { shell } of reachable) visitChildren(shell.id);
+  for (const { parent, shell } of reachable.reverse()) {
+    const descendants = branches.get(shell.id);
+    const siblings = branches.get(parent);
+    const status = shell.activityRunStatus ?? shell.status;
+    branches.set(parent, {
+      descendantCount: (siblings?.descendantCount ?? 0) + 1 + (descendants?.descendantCount ?? 0),
+      runningCount:
+        (siblings?.runningCount ?? 0) +
+        Number(status === "running") +
+        (descendants?.runningCount ?? 0),
+      hasActiveDescendants:
+        siblings?.hasActiveDescendants === true ||
+        descendants?.hasActiveDescendants === true ||
+        ["preparing", "starting", "queued", "pending", "running", "waiting"].includes(status ?? ""),
+    });
+  }
+  return branches;
+}
+
 export function isParentThreadRelationship(
   edge: ThreadRelationshipEdge,
   currentThreadId: ThreadId,
