@@ -278,7 +278,10 @@ describe("ServerBrowserContexts", () => {
         expect(launches.persistent).toHaveBeenCalledExactlyOnceWith(
           "/test/profiles/work",
           expect.objectContaining({
-            args: expect.arrayContaining(["--enable-unsafe-extension-debugging"]),
+            args: expect.arrayContaining([
+              "--enable-unsafe-extension-debugging",
+              "--screen-info={2560x1600}",
+            ]),
             ignoreDefaultArgs: ["--enable-automation", "--disable-extensions"],
           }),
         );

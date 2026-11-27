@@ -286,7 +286,12 @@ export class ServerBrowserContexts {
     const { executable, ...options } = await this.launchOptions();
     const extensions = extensionPaths(options.env);
     if (extensions.length > 0) {
-      options.args.push("--enable-unsafe-extension-debugging");
+      options.args.push(
+        "--enable-unsafe-extension-debugging",
+        // Chrome fits an extension popup onto the screen. The headless default of 800x600 is
+        // 400x300 at this scale factor, which cuts popups off at 210px tall.
+        "--screen-info={2560x1600}",
+      );
       options.ignoreDefaultArgs.push("--disable-extensions");
     }
     const { chromium } = loadPlaywright();
