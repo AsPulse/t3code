@@ -262,8 +262,11 @@ import type { PendingApproval, PendingUserInput, TimelineEntry } from "../../ses
 import {
   composerRunsDraftLocally,
   resolveComposerDispatchMode,
+  type ActiveTurnComposerAction,
   type ComposerDispatchMode,
 } from "@t3tools/client-runtime/state/composer-dispatch";
+import { contextMenuSourceOf } from "../../contextMenuSource";
+import { readLocalApi } from "../../localApi";
 import {
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
@@ -2303,6 +2306,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     );
   };
   const handleSubmitMessageStable = useStableCallback(handleSubmitMessage);
+  // Resolves against the state when the menu closes; the turn may have ended while it was open.
+  const submitChosenFollowUp = useStableCallback((action: ActiveTurnComposerAction) => {
+    const running = phase === "running" || phase === "connecting";
+    const alternateModifier = action !== followUpBehavior;
+    submitComposer(
+      undefined,
+      resolveComposerDispatchMode({
+        running,
+        alternateModifier,
+        activeTurnDefault: followUpBehavior,
+        canSteer,
+      }),
+      running && alternateModifier ? "alternate" : undefined,
+    );
+  });
+  const handleSendButtonContextMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const api = readLocalApi();
+    if (!api) return;
+    event.preventDefault();
+    void api.contextMenu
+      .show<ActiveTurnComposerAction>(
+        [
+          { id: "queue", label: gt("Queue message"), icon: "list-plus" },
+          { id: "steer", label: gt("Steer message"), icon: "corner-up-right" },
+        ],
+        { x: event.clientX, y: event.clientY },
+        contextMenuSourceOf(event),
+      )
+      .then((action) => {
+        if (action !== null) submitChosenFollowUp(action);
+      });
+  };
+  const handleSendButtonContextMenuStable = useStableCallback(handleSendButtonContextMenu);
   const submitCitationAndSend = () => {
     return submitComposer(
       undefined,
@@ -3870,6 +3906,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     preserveComposerFocusOnPointerDown={isMobileViewport}
                     isEditingQueuedMessage={isEditingQueuedMessage}
                     onSubmitMessage={handleSubmitMessageStable}
+                    onChooseFollowUpAction={handleSendButtonContextMenuStable}
                     onResume={onResume}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryActionStable}

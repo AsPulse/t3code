@@ -165,6 +165,32 @@ it("keeps a pending stop when the run id clears and resets it for a different ru
   expect(screen.getByRole("button", { name: "Stop generation" }).element()).toBeEnabled();
 });
 
+it("offers the Queue or Steer menu on right-click only while the running turn can steer", async () => {
+  const onChooseFollowUpAction = vi.fn();
+  const view = (overrides: Partial<ComponentProps<typeof ComposerPrimaryActions>> = {}) => (
+    <ComposerPrimaryActions
+      {...setup()}
+      hasSendableContent
+      onChooseFollowUpAction={onChooseFollowUpAction}
+      {...overrides}
+    />
+  );
+  await using screen = await render(view());
+  const rightClick = (name: string) =>
+    screen
+      .getByRole("button", { name, exact: true })
+      .element()
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  await act(() => rightClick("Steer message"));
+  expect(onChooseFollowUpAction).toHaveBeenCalledTimes(1);
+
+  await screen.rerender(view({ canSteer: false }));
+  await act(() => rightClick("Queue message"));
+  await screen.rerender(view({ isRunning: false, canInterrupt: false }));
+  await act(() => rightClick("Submit message"));
+  expect(onChooseFollowUpAction).toHaveBeenCalledTimes(1);
+});
+
 it("swaps the collapsed composer's send button for Stop while a turn can be stopped", async () => {
   const onInterrupt = vi.fn();
   const collapsed = (overrides: { canInterrupt?: boolean; hasSendableContent?: boolean } = {}) => (
