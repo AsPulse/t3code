@@ -11,3 +11,4 @@ carry/nested-subagents-in-lineage Lineage パネルで、サブエージェン�
 # carry/bot-tasks-wakeup carry/bots に統合
 # carry/bot-context-rotation carry/bots に統合
 carry/bots             Bot Workspace・Work/Bots 2 モードサイドバー・Bot 管理 MCP・Bot タスク自動タグと完了ウェイク・汎用コンテキストローテーション（bot-workspace-sidebar / bot-tasks-wakeup / bot-context-rotation を統合）
+carry/server-browser-extensions サーバーブラウザに未パッケージの拡張（1Password など）を読み込み、拡張が開いた画面をユーザーのタブとして映す。拡張のタブはエージェントから操作も読み取りもできない。ブラウザの実行ファイルも環境変数で指定できる
