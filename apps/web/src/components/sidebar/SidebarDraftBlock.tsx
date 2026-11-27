@@ -1,5 +1,5 @@
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
-import type { ContextMenuSource } from "@t3tools/contracts";
+import type { ContextMenuSource, EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { contextMenuSourceOf } from "../../contextMenuSource";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -155,6 +155,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   projectByKey: ReadonlyMap<string, EnvironmentProject>;
   projectDisplayNameByKey: ReadonlyMap<string, string>;
   scopedProjectKeys: ReadonlySet<string> | null;
+  excludedProjects?: ReadonlyMap<EnvironmentId, ReadonlySet<ProjectId>> | undefined;
   routeDraftId: string | null;
   onNavigateToDraft: (draftId: DraftId) => void;
   onDraftContextMenu: (
@@ -193,7 +194,10 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const drafts = (() => {
     const rows: SidebarDraftRowData[] = [];
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (session.promotedTo != null) {
+      if (
+        session.promotedTo != null ||
+        props.excludedProjects?.get(session.environmentId)?.has(session.projectId)
+      ) {
         continue;
       }
       if (

@@ -1,8 +1,10 @@
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
   EnvironmentId,
   GitCommandError,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -13,6 +15,7 @@ import {
   type OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
@@ -29,6 +32,11 @@ import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
+import * as BotRegistry from "../../../bot/BotRegistryService.ts";
+import * as BotRegistryTest from "../../../bot/BotRegistryService.testkit.ts";
+import * as CheckpointStore from "../../../checkpointing/CheckpointStore.ts";
+import * as GitWorkflow from "../../../git/GitWorkflowService.ts";
+import * as EventSink from "../../../orchestration-v2/EventSink.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -37,6 +45,10 @@ import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ProjectSetupScriptRunner from "../../../project/ProjectSetupScriptRunner.ts";
+import * as WorktreeSetupTracker from "../../../project/WorktreeSetupTracker.ts";
+import * as TerminalManager from "../../../terminal/Manager.ts";
+import * as TextGeneration from "../../../textGeneration/TextGeneration.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as SourceControlProviderRegistry from "../../../sourceControl/SourceControlProviderRegistry.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
@@ -44,6 +56,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { layerNoBots } from "../../McpToolAccess.testkit.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -73,6 +86,7 @@ const clientLaunchHarness = (input: {
     model: input.overrideModel === undefined ? modelSelection : null,
   };
   const layerDependencies = Layer.mergeAll(
+    layerNoBots,
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(input.providers ?? []),
       refreshWorkspaceSnapshot: () => Effect.succeed(input.providers ?? []),
@@ -193,6 +207,149 @@ const clientLaunchHarness = (input: {
   );
   return { projectId, modelSelection, projectDefaults, dependencies: layerDependencies };
 };
+
+const layerBotLaunch = ThreadLaunch.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      BotRegistryTest.layer,
+      IdAllocator.layer,
+      WorktreeSetupTracker.layer,
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
+      Layer.mock(TerminalManager.TerminalManager)({}),
+      Layer.mock(GitWorkflow.GitWorkflowService)({ currentBranch: () => Effect.succeed(null) }),
+      Layer.mock(CheckpointStore.CheckpointStore)({ isGitRepository: () => Effect.succeed(false) }),
+      Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
+      Layer.mock(TextGeneration.TextGeneration)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        folderForThread: () => Effect.succeedNone,
+      }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-bot-launch-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+      Layer.mock(PeerForwarding.PeerForwarding)({}),
+      DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+  ),
+);
+
+it.effect.each([
+  { name: "a registered bot in a different project", registered: true, owner: true },
+  { name: "a Bot Workspace thread", workspace: true, owner: true },
+  { name: "an ordinary thread", surface: "bot" },
+  { name: "a Bot Workspace thread launching in Work", workspace: true, surface: "work" },
+  { name: "a Bot Workspace thread opting out of wakes", workspace: true, notifyOwner: false },
+  { name: "a thread in a disabled Bot Workspace", workspace: true, disabled: true },
+  { name: "a Bot Workspace thread with an overlong ID", workspace: true, longId: true },
+] as const)("stores initial task tags for $name", (scenario) =>
+  Effect.gen(function* () {
+    const {
+      projectId: botProject,
+      otherId: workProject,
+      residentProjectId,
+      modelSelection,
+    } = BotRegistryTest;
+    const callerProject =
+      "workspace" in scenario
+        ? botProject
+        : "registered" in scenario
+          ? residentProjectId
+          : workProject;
+    const threadId = ThreadId.make("longId" in scenario ? "x".repeat(55) : "thread:caller");
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const registry = yield* BotRegistry.BotRegistryService;
+    yield* registry.setWorkspace({ projectId: botProject, enabled: true });
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-caller"),
+      threadId,
+      projectId: callerProject,
+      title: "Caller",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      initialMessage: {
+        messageId: MessageId.make("caller-message"),
+        text: "Launch a task",
+        attachments: [],
+      },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    if ("registered" in scenario) {
+      yield* registry.upsert({ projectId: botProject, name: "Resident", threadId });
+    }
+    if ("disabled" in scenario) {
+      yield* registry.setWorkspace({ projectId: botProject, enabled: false });
+    }
+
+    const invocation = {
+      environmentId: EnvironmentId.make("environment:bots"),
+      requestNamespace: "provider:bots",
+      thread: {
+        threadId,
+        providerSessionId: "provider:bots",
+        providerInstanceId: modelSelection.instanceId,
+      },
+      client: undefined,
+      issuedAt: 0,
+      capabilities: new Set(["orchestration" as const]),
+    };
+    const toolkit = yield* ProjectToolkit;
+    const launch = () =>
+      toolkit
+        .handle("t3_thread_launch", {
+          title: "Task in Work project",
+          projectId: workProject,
+          message: "Do the task",
+          clientRequestId: "launch-task",
+          ...("surface" in scenario ? { surface: scenario.surface } : {}),
+          ...("notifyOwner" in scenario ? { notifyOwner: scenario.notifyOwner } : {}),
+        })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.map((frames) => frames.at(-1)?.result),
+        );
+    const result = yield* launch();
+    if (result === undefined || !("threadId" in result)) {
+      return yield* Effect.die(new Error(`Bot task launch failed: ${JSON.stringify(result)}`));
+    }
+    expect(result.projectId).toBe(workProject);
+    const expectedTags =
+      "owner" in scenario
+        ? ["bot:task", `bot:owner:${threadId}`]
+        : "notifyOwner" in scenario || "longId" in scenario
+          ? ["bot:task"]
+          : undefined;
+    const projection = yield* threads.getThreadProjection(result.threadId);
+    expect(projection.thread.tags).toEqual(expectedTags);
+    expect((yield* threads.getThreadShell(result.threadId))?.tags).toEqual(expectedTags);
+    const events = yield* (yield* EventSink.EventSinkV2)
+      .readByCommandId({ commandId: CommandId.make(result.threadId) })
+      .pipe(Stream.runCollect);
+    const created = events.find(({ event }) => event.type === "thread.created")?.event;
+    expect(created?.type).toBe("thread.created");
+    expect(created?.type === "thread.created" && created.payload.tags).toEqual(expectedTags);
+    expect(events.some(({ event }) => event.type === "run.created")).toBe(true);
+
+    if ("registered" in scenario) {
+      yield* registry.setWorkspace({ projectId: botProject, enabled: false });
+      expect(yield* launch()).toMatchObject({ threadId: result.threadId, runId: result.runId });
+      expect((yield* threads.getThreadShell(result.threadId))?.tags).toEqual(expectedTags);
+    }
+  }).pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+        Layer.provideMerge(layerBotLaunch),
+      ),
+    ),
+  ),
+);
 
 it.effect(
   "a client launches with the project's default model and mode, capped at its ceiling",

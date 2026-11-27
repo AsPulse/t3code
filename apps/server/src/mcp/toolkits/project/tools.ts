@@ -22,6 +22,7 @@ import {
   SourceControlCloneRepositoryResult,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
+import * as BotRegistry from "../../../bot/BotRegistryService.ts";
 import * as DocumentText from "../../../provider/DocumentText.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
@@ -157,6 +158,16 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+    surface: Schema.optional(
+      Schema.Literals(["bot", "work"]).annotate({
+        description: "Only from a Bot thread: show the new thread in Bots (default) or Work.",
+      }),
+    ),
+    notifyOwner: Schema.optional(
+      Schema.Boolean.annotate({
+        description: "Only from a Bot thread: set false to skip waking the caller for Bot tasks.",
+      }),
+    ),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   }),
@@ -171,6 +182,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   dependencies: [
     ...shared.dependencies,
     ThreadLaunchService.ThreadLaunchService,
+    BotRegistry.BotRegistryService,
     ManagedProjectFolders.ManagedProjectFolders,
     GitVcsDriver.GitVcsDriver,
     FileSystem.FileSystem,

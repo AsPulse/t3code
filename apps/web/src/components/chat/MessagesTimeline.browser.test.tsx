@@ -2460,3 +2460,46 @@ it("keeps concurrent approvals actionable outside collapsed work and restores se
     .element(screen.getByRole("button", { name: "Open the current tab", exact: true }))
     .toBeVisible();
 });
+
+it("reveals the maintenance prompt and handoff when the refresh row is opened", async () => {
+  setup();
+  const fixture = makeStreamingTimelineFixture("Saved handoff summary");
+  const visibleTurnItems = fixture.visibleTurnItems.slice(3).map(({ item, ...row }) => ({
+    ...row,
+    item:
+      item.type === "user_message"
+        ? { ...item, maintenance: "bot_context_rotation" as const, text: "Write a handoff summary" }
+        : item.type === "assistant_message"
+          ? { ...item, streaming: false, status: "completed" as const }
+          : item,
+  }));
+  const timelineEntries = deriveTimelineEntriesFromVisibleTurnItems({
+    visibleTurnItems,
+    optimisticMessages: [],
+  });
+  const container = document.createElement("div");
+  container.style.cssText = "height: 1200px; width: 900px; display: flex; flex-direction: column;";
+  await using screen = await render(
+    <MessagesTimeline
+      {...baseProps()}
+      timelineEntries={timelineEntries}
+      latestRun={{
+        runId: fixture.runId,
+        status: "completed",
+        startedAt: fixture.time(5),
+        completedAt: fixture.time(8),
+      }}
+    />,
+    { container },
+  );
+  const fold = screen.getByRole("button", { name: "Context refreshed" });
+  await expect.element(fold).toHaveAttribute("aria-expanded", "false");
+  expect(container.querySelectorAll("[data-timeline-row-kind]")).toHaveLength(1);
+  expect(container.textContent).not.toContain("Write a handoff summary");
+  expect(container.textContent).not.toContain("Saved handoff summary");
+
+  await fold.click();
+  await expect.element(fold).toHaveAttribute("aria-expanded", "true");
+  await expect.element(screen.getByText("Write a handoff summary")).toBeVisible();
+  await expect.element(screen.getByText("Saved handoff summary")).toBeVisible();
+});

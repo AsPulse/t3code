@@ -2,6 +2,7 @@ import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import {
+  botForThread,
   CommandId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   latestProviderTurnForAttempt,
@@ -32,6 +33,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
+import { readRotationHandoff } from "../bot/BotContextRotation.ts";
 import * as ServerConfig from "../config.ts";
 import {
   CLAUDE_PROVIDER,
@@ -280,6 +282,7 @@ export const layer: Layer.Layer<
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const settings = yield* ServerSettings.ServerSettingsService;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
@@ -999,6 +1002,20 @@ export const layer: Layer.Layer<
         session.driver === "claudeAgent" ||
         session.providerSession.capabilities.turns.supportsNativeGoals === true;
       const goalCommand = goalDriver && parseGoalCommand(providerMessage) !== null;
+      const rotation =
+        run.freshContext === true && message.scheduledTaskId === undefined
+          ? yield* readRotationHandoff(projectionStore, projection, run.ordinal)
+          : null;
+      const rotationContext =
+        rotation === null
+          ? ""
+          : [
+              botForThread(yield* settings.getSettings, input.threadId)?.contextRotation
+                ?.bootstrapPrompt,
+              rotation.summary,
+            ]
+              .filter((part) => part !== undefined && part.trim() !== "")
+              .join("\n\n");
       // The provider turn marks cancellation work delivered; restart continuations use their own text or resume natively.
       const noteContinuation = isRestartNoteContinuation(
         run,
@@ -1992,7 +2009,7 @@ export const layer: Layer.Layer<
             sideChatHandoff === undefined || compact || goalCommand
               ? ""
               : sideChatHandoff.summaryText;
-          const context = [delivery.context, sideChatContext, restartNote]
+          const context = [rotationContext, delivery.context, sideChatContext, restartNote]
             .filter((part) => part !== "")
             .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
@@ -2087,6 +2104,7 @@ export const layer: Layer.Layer<
         retryHandoff.attachments.length === 0 &&
         sideChatHandoff === undefined &&
         restartNote === "" &&
+        rotationContext === "" &&
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);

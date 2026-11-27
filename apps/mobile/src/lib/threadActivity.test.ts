@@ -2286,3 +2286,24 @@ it("caps live thought previews while preserving reasoning detail", () => {
   expect(JSON.parse(activity.getFullDetail()!).item).toMatchObject({ text });
   expect(activity.getCopyText()).toContain(text);
 });
+
+it("folds the maintenance transcript in the mobile feed", () => {
+  const feed = buildThreadFeed([
+    projected({ ...userMessage(), maintenance: "bot_context_rotation", text: "Save handoff" }, 0),
+    projected(command(), 1),
+    projected({ ...assistantMessage(), text: "Saved handoff" }, 2),
+  ]);
+  const collapsed = deriveThreadFeedPresentation(feed, null, new Set());
+  expect(collapsed).toMatchObject([
+    { type: "run-fold", label: "Context refreshed", expanded: false },
+  ]);
+  const expanded = deriveThreadFeedPresentation(feed, null, new Set([runId]));
+  expect(expanded.map((entry) => entry.type)).toEqual([
+    "run-fold",
+    "message",
+    "activity-group",
+    "message",
+  ]);
+  expect(expanded[1]).toMatchObject({ message: { text: "Save handoff" } });
+  expect(expanded[3]).toMatchObject({ message: { text: "Saved handoff" } });
+});

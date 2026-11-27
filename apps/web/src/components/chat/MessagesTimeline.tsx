@@ -1887,6 +1887,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
           createdAt={row.createdAt}
           timestampFormat={ctx.timestampFormat}
           className="ms-auto"
+          alwaysVisible={row.maintenanceTime === true}
         />
       </div>
       {loading ? <WorkHistorySkeleton /> : null}

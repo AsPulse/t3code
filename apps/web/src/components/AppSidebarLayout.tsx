@@ -1,3 +1,4 @@
+import { registerSidebarBotCommands } from "./sidebar/sidebarBots";
 import { useAtomValue } from "@effect/atom-react";
 import { useGT } from "gt-react";
 import * as Schema from "effect/Schema";
@@ -301,6 +302,7 @@ function registerAppShellCommands(router: AnyRouter, shellElement: Element): () 
     "expanded";
   const disposers = [
     registerThreadUndoCommands(router, readSidebarVisible),
+    registerSidebarBotCommands(router),
     registerNavigationHistoryCommands(router),
     registerWorkspaceFocusCommands(router),
     registerPullRequestsEscapeCommand(router),
