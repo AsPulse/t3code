@@ -4,7 +4,10 @@ import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import type { DesktopPreviewAnnotationVoiceConfig } from "@t3tools/contracts";
-import { previewStreamDownloadUrl } from "@t3tools/client-runtime/preview/server-browser-stream";
+import {
+  previewStreamDownloadUrl,
+  type PreviewStreamExtension,
+} from "@t3tools/client-runtime/preview/server-browser-stream";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -41,6 +44,7 @@ import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { readComposerImageBytes } from "../chat/composerAttachmentFiles";
 import { ensureLocalApi } from "~/localApi";
 import { getClientSettings } from "~/hooks/useSettings";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import {
   rememberPreviewUrl,
   updatePreviewServerSnapshot,
@@ -79,6 +83,7 @@ import { showPreviewPopup } from "./showPreviewPopup";
 import { PreviewChromeRow } from "./PreviewChromeRow";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 import { PreviewMoreMenu, type PreviewMoreMenuActions } from "./PreviewMoreMenu";
+import { ExtensionPopupPanel } from "./ExtensionPopupPanel";
 import { commitBrowserViewportChange } from "~/browser/browserViewportActions";
 import { browserResponsiveViewportForToggle, useBrowserDefaults } from "~/browser/browserDefaults";
 import { BrowserDeviceToolbar } from "~/browser/BrowserDeviceToolbar";
@@ -230,6 +235,9 @@ export function PreviewView({
   const isServerTab = snapshot?.runtime === "server" && !nativeServerTab;
   const serverOwnsRendering = snapshot?.runtime === "server";
   const serverSurfaceRef = useRef<ServerBrowserHandle | null>(null);
+  const closeExtensionPopup = useStableCallback(() =>
+    serverSurfaceRef.current?.closeExtensionPopup(),
+  );
   const serverSurfaceBoxRef = useRef<HTMLDivElement | null>(null);
   const [serverAspectRatioLocked, setServerAspectRatioLocked] = useState(false);
   const [serverToolbarWidth, setServerToolbarWidth] = useState(0);
@@ -246,6 +254,13 @@ export function PreviewView({
   }, [serverToolbarShown]);
   const [serverControlledTabId, setServerControlledTabId] = useState<string | null>(null);
   const serverInputDisabled = isServerTab && serverControlledTabId !== runtimeTabId;
+  const [serverExtensions, setServerExtensions] = useState<{
+    tabId: string;
+    items: readonly PreviewStreamExtension[];
+  } | null>(null);
+  const [extensionPopup, setExtensionPopup] = useState<{ tabId: string; revision: number } | null>(
+    null,
+  );
   const [serverStreamSettledTabId, setServerStreamSettledTabId] = useState<string | null>(null);
   // A desktop page that mounted before its tab went headless leaves its stale state here.
   const desktopOverlay =
@@ -1055,6 +1070,15 @@ export function PreviewView({
                 (serverOwnsRendering || (desktopOverlay?.hasWebContents ?? false))
               }
               actions={moreMenuActions}
+              {...(isServerTab && serverExtensions?.tabId === runtimeTabId
+                ? {
+                    extensions: {
+                      items: serverExtensions.items,
+                      onAction: (id) => serverSurfaceRef.current?.extensionAction(id),
+                      disabled: serverInputDisabled,
+                    },
+                  }
+                : {})}
               {...(moveTarget
                 ? { move: { label: moveLabel, onMove: () => void handleMoveTab() } }
                 : {})}
@@ -1123,9 +1147,37 @@ export function PreviewView({
                   setServerControlledTabId(control?.controller === "you" ? runtimeTabId : null)
                 }
                 onPopup={(popupTabId) => showPreviewPopup(threadRef, popupTabId, "panel")}
+                onExtensions={(items) =>
+                  setServerExtensions((previous) =>
+                    items.length > 0
+                      ? { tabId: runtimeTabId, items }
+                      : previous?.tabId === runtimeTabId
+                        ? null
+                        : previous,
+                  )
+                }
+                onExtensionPopup={(open) =>
+                  setExtensionPopup((previous) =>
+                    open
+                      ? { tabId: runtimeTabId, revision: (previous?.revision ?? 0) + 1 }
+                      : previous?.tabId === runtimeTabId
+                        ? null
+                        : previous,
+                  )
+                }
                 // Stays connected under the empty state so a URL picked there reaches the page.
                 className="absolute inset-0 h-full w-full"
               />
+              {extensionPopup?.tabId === runtimeTabId ? (
+                <ExtensionPopupPanel
+                  key={extensionPopup.revision}
+                  environmentId={threadRef.environmentId}
+                  threadId={threadRef.threadId}
+                  tabId={snapshot.tabId}
+                  visible={visible}
+                  onClose={serverInputDisabled ? undefined : closeExtensionPopup}
+                />
+              ) : null}
             </div>
           </>
         ) : runtimeTabId && snapshot && !showEmptyState ? (

@@ -94,6 +94,18 @@ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
+import {
+  assertAgentCanAccessTab,
+  contextExtensions,
+  isExtensionTab,
+  isExtensionUrl,
+  type ServerBrowserExtension,
+} from "./ServerBrowserExtensions.ts";
+import {
+  attachExtensionPopupViewer as attachPopupViewer,
+  triggerExtensionAction,
+} from "./ServerBrowserExtensionPopup.ts";
+import { asRecord, editingCommand, modifiersOf, num } from "./ServerBrowserInput.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
 
@@ -251,6 +263,8 @@ export type ServerBrowserViewerOutput =
     }
   | { readonly _tag: "fileChooserClosed"; readonly id: string }
   | { readonly _tag: "popup"; readonly tabId: string }
+  | { readonly _tag: "extensions"; readonly extensions: readonly ServerBrowserExtension[] }
+  | { readonly _tag: "extensionPopup"; readonly open: boolean }
   | {
       readonly _tag: "download";
       readonly id: string;
@@ -267,21 +281,24 @@ export interface ServerBrowserViewer {
 
 export type ProfileReporter = (input: PreviewReportProfilesInput) => Effect.Effect<void>;
 
+type AttachViewer = (input: {
+  readonly threadId: string;
+  readonly tabId: string;
+  readonly maxWidth: number;
+  readonly maxHeight: number;
+  readonly quality: number;
+  readonly canOperate: boolean;
+}) => Effect.Effect<
+  ServerBrowserViewer,
+  ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
+  Scope.Scope
+>;
+
 export class ServerBrowser extends Context.Service<
   ServerBrowser,
   {
-    readonly attachViewer: (input: {
-      readonly threadId: string;
-      readonly tabId: string;
-      readonly maxWidth: number;
-      readonly maxHeight: number;
-      readonly quality: number;
-      readonly canOperate: boolean;
-    }) => Effect.Effect<
-      ServerBrowserViewer,
-      ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
-      Scope.Scope
-    >;
+    readonly attachViewer: AttachViewer;
+    readonly attachExtensionPopupViewer: AttachViewer;
 
     readonly answerFileChooser: (input: {
       readonly threadId: string;
@@ -339,6 +356,7 @@ interface ServerTab {
   readonly threadId: ThreadId;
   readonly tabId: string;
   readonly page: Page;
+  readonly extension: boolean;
   readonly cdp: CDPSession;
   readonly frameSessions: Map<Frame, CDPSession>;
   /** Copy reads run in key order, outside the input queue. */
@@ -412,6 +430,12 @@ interface ServerTab {
   capturing: number;
 }
 
+interface AdoptedPage {
+  readonly page: Page;
+  readonly openerTabId?: string;
+  readonly extension: boolean;
+}
+
 interface ServerDownload {
   readonly id: string;
   readonly fileName: string;
@@ -456,39 +480,6 @@ const viewportSettingsEqual = (left: PreviewViewportSetting, right: PreviewViewp
 
 const fixedViewportSize = (setting: PreviewViewportSetting) =>
   setting._tag === "fill" ? null : { width: setting.width, height: setting.height };
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-
-const num = (value: unknown, fallback = 0) =>
-  typeof value === "number" && Number.isFinite(value) ? value : fallback;
-
-const modifiersOf = (message: Record<string, unknown>) => {
-  const value = num(message.modifiers);
-  return Number.isInteger(value) && value >= 0 && value < 16 ? value : 0;
-};
-
-// Linux/headless Chromium needs commands for Cmd editing shortcuts and Ctrl copy/cut.
-const editingCommand = (key: string, modifiers: number) => {
-  const modifier = modifiers & 0b0111;
-  if (modifier !== 2 && modifier !== 4) return null;
-  const lower = key.toLowerCase();
-  const command =
-    lower === "c"
-      ? "copy"
-      : lower === "x"
-        ? "cut"
-        : modifier !== 4
-          ? null
-          : lower === "a"
-            ? "selectAll"
-            : lower === "z"
-              ? modifiers & 8
-                ? "redo"
-                : "undo"
-              : null;
-  return command ? { commands: [command] } : null;
-};
 
 const TITLE_LIMIT = 512;
 const TITLE_WORLD = "t3-preview-title";
@@ -600,7 +591,9 @@ const make = Effect.gen(function* () {
   >();
 
   const closedPendingTabs = new Set<string>();
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<string, AdoptedPage>();
+  const adoptedBrowserPages = new WeakSet<Page>();
+  const extensionPopups = new Map<string, Page>();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -641,7 +634,7 @@ const make = Effect.gen(function* () {
 
   // Playwright cannot reload a crashed page, so a fresh page takes over its tab.
   const reopenCrashedTab = async (tab: ServerTab) => {
-    if (tab.desktop) return dropTab(tab, true);
+    if (tab.desktop || tab.extension) return dropTab(tab, true);
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     const crash = {
@@ -1012,6 +1005,9 @@ const make = Effect.gen(function* () {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
+    const extensionPopup = extensionPopups.get(key);
+    extensionPopups.delete(key);
+    if (extensionPopup) void extensionPopup.close().catch(constVoid);
     tab.closing = true;
     tab.viewerAttached?.resolve();
     clearAbortedNavigation(tab);
@@ -1154,6 +1150,7 @@ const make = Effect.gen(function* () {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
       page,
+      extension: adopted?.extension ?? false,
       cdp,
       frameSessions: new Map(),
       copyReads: Promise.resolve(),
@@ -1360,7 +1357,9 @@ const make = Effect.gen(function* () {
     page.on("download", (download) => void saveDownload(tab, download));
     updateFileChooserInterception(tab);
     // Popups become tabs and keep `window.opener`, so sign-in popups can report back.
-    page.on("popup", (popup) => void adoptPopup(tab, popup));
+    page.on("popup", (popup) =>
+      adoptPage(tab, { page: popup, openerTabId: tab.tabId, extension: isExtensionTab(tab) }),
+    );
     const key = tabKey(tab.threadId, tab.tabId);
     if (closedPendingTabs.delete(key)) {
       if (desktop) {
@@ -1373,9 +1372,13 @@ const make = Effect.gen(function* () {
     page.on("close", () => dropTab(tab, true));
     page.on("crash", () => reopenCrashedTab(tab));
     tabs.set(key, tab);
+    if (!desktop) {
+      for (const candidate of context.pages()) void adoptExtensionPage(context, candidate);
+    }
     reportLiveTabs();
     // A desktop page navigates on its own and can finish loading before these listeners attach.
-    if (desktop) void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
+    if (desktop || tab.extension)
+      void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
     // Existing desktop and popup PDFs can start loading before interception attaches.
     if (
       snapshot.navStatus._tag === "Loading" &&
@@ -1632,6 +1635,7 @@ const make = Effect.gen(function* () {
   const prepareContext = async (context: BrowserContext) => {
     if (preparedContexts.has(context)) return;
     preparedContexts.add(context);
+    context.on("page", (page) => adoptExtensionPage(context, page));
     await context.grantPermissions(["clipboard-write"]);
   };
 
@@ -1701,38 +1705,44 @@ const make = Effect.gen(function* () {
     return copies.flat().find((text) => text.length > 0);
   };
 
-  const adoptPopup = async (opener: ServerTab, popup: Page) => {
-    if (opener.closing) {
-      await popup.close().catch(constVoid);
+  const adoptExtensionPage = async (context: BrowserContext, page: Page) => {
+    if (adoptedBrowserPages.has(page)) return;
+    if (!isExtensionUrl(page.url()) || (await page.opener()) !== null) return;
+    const contextTabs = [...tabs.values()].filter((tab) => tab.page.context() === context);
+    if (contextTabs.some((tab) => tab.page === page)) return;
+    const home = contextTabs.filter((tab) => !tab.closing).sort(preferVisibleRecentTab)[0];
+    if (home) await adoptPage(home, { page, extension: true });
+  };
+
+  const adoptPage = async (home: ServerTab, adopted: AdoptedPage) => {
+    const page = adopted.page;
+    if (adoptedBrowserPages.has(page)) return;
+    adoptedBrowserPages.add(page);
+    if (home.closing) {
+      await page.close().catch(constVoid);
       return;
     }
-    const url = popup.url();
+    const url = page.url();
+    const agentId = adopted.extension ? null : home.control.agentId;
 
-    const controller = [...opener.viewers].find(
-      (viewer) => viewer.id === opener.control.controller,
-    );
+    const controller = [...home.viewers].find((viewer) => viewer.id === home.control.controller);
     await runPromise(
       openTab({
-        threadId: opener.threadId,
+        threadId: home.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
-        ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
-        colorScheme: opener.colorScheme,
-        ...(opener.control.agentId === null
-          ? {}
-          : { automationOwner: opener.control.agentId, reveal: false }),
+        ...(home.profileId === undefined ? {} : { profileId: home.profileId }),
+        colorScheme: home.colorScheme,
+        ...(agentId === null ? {} : { automationOwner: agentId, reveal: false }),
         beforePublish: (snapshot) =>
-          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
-            page: popup,
-            openerTabId: opener.tabId,
-          }),
+          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), adopted),
       }),
     ).then(
       (tab) => {
-        if (opener.control.agentId === null) controller?.push({ _tag: "popup", tabId: tab.tabId });
+        if (agentId === null) controller?.push({ _tag: "popup", tabId: tab.tabId });
       },
       async () => {
-        await popup.close().catch(constVoid);
+        await page.close().catch(constVoid);
       },
     );
   };
@@ -1796,6 +1806,9 @@ const make = Effect.gen(function* () {
   // The desktop draws its tabs in its own webview, so they never get a streamed viewer.
   const isVisible = (tab: ServerTab) =>
     tab.viewers.size > 0 || (tab.desktop !== null && desktopChannel.isShown(tab));
+
+  const preferVisibleRecentTab = (left: ServerTab, right: ServerTab) =>
+    Number(isVisible(right)) - Number(isVisible(left)) || right.usedAt - left.usedAt;
 
   const reclaimingTabs = new Set<ServerTab>();
   const idleAgentTabs = () => {
@@ -1892,15 +1905,14 @@ const make = Effect.gen(function* () {
   };
 
   const latestThreadTab = (threadId: string, agentSessionId?: string) => {
-    const threadTabs = [...tabs.values()].filter((tab) => tab.threadId === threadId);
+    const threadTabs = [...tabs.values()].filter(
+      (tab) => tab.threadId === threadId && !isExtensionTab(tab),
+    );
     return (
       threadTabs
         .filter((tab) => tab.control.agentId === agentSessionId)
         .sort((left, right) => right.createdAt - left.createdAt)[0] ??
-      threadTabs.sort(
-        (left, right) =>
-          Number(isVisible(right)) - Number(isVisible(left)) || right.usedAt - left.usedAt,
-      )[0]
+      threadTabs.sort(preferVisibleRecentTab)[0]
     );
   };
 
@@ -2144,7 +2156,7 @@ const make = Effect.gen(function* () {
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
       tabs: [...tabs.values()]
-        .filter((candidate) => candidate.threadId === tab.threadId)
+        .filter((candidate) => candidate.threadId === tab.threadId && !isExtensionTab(candidate))
         .map((candidate) => ({
           tabId: candidate.tabId,
           url:
@@ -2515,6 +2527,7 @@ const make = Effect.gen(function* () {
         message: "No server preview tab is open for this thread. Call preview_open first.",
       });
     }
+    assertAgentCanAccessTab(tab);
     if (!READ_OPERATIONS.has(request.operation) && !tab.control.agentMayAct(request.agentSessionId))
       throw new BrowserControlInterrupted({
         message:
@@ -2541,13 +2554,14 @@ const make = Effect.gen(function* () {
   ): Promise<unknown> => {
     const input = request.input;
     switch (request.operation) {
-      case "status":
-        return statusWithTitle(
+      case "status": {
+        const tab =
           request.tabId === undefined
             ? latestThreadTab(request.threadId, request.agentSessionId)
-            : tabs.get(tabKey(request.threadId, request.tabId)),
-          request.agentSessionId,
-        );
+            : tabs.get(tabKey(request.threadId, request.tabId));
+        if (tab) assertAgentCanAccessTab(tab);
+        return statusWithTitle(tab, request.agentSessionId);
+      }
       case "open": {
         if (!request.agentSessionId)
           throw new BrowserControlInterrupted({
@@ -2593,6 +2607,7 @@ const make = Effect.gen(function* () {
               : "The requested server preview tab does not exist.",
           });
         }
+        if (found) assertAgentCanAccessTab(found);
         // Reusing another session's tab requires explicit tabId; reading it grants no implicit takeover.
         const existing =
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
@@ -3027,6 +3042,44 @@ const make = Effect.gen(function* () {
     viewer.requestedSize = null;
   };
 
+  const openExtensionPopup = async (tab: ServerTab, extensionId: string) => {
+    const key = tabKey(tab.threadId, tab.tabId);
+    const current = extensionPopups.get(key);
+    if (current?.url().startsWith(`chrome-extension://${extensionId}/`)) {
+      void current.close().catch(constVoid);
+      return;
+    }
+    const popup = await triggerExtensionAction(tab.page.context(), tab.page, extensionId, (page) =>
+      adoptedBrowserPages.add(page),
+    );
+    if (!popup || popup.isClosed()) return;
+    if (tabs.get(key) !== tab) {
+      await popup.close();
+      return;
+    }
+    const previous = extensionPopups.get(key);
+    extensionPopups.set(key, popup);
+    if (previous) void previous.close().catch(constVoid);
+    popup.once("close", () => {
+      if (extensionPopups.get(key) !== popup) return;
+      extensionPopups.delete(key);
+      for (const viewer of tab.viewers) viewer.push({ _tag: "extensionPopup", open: false });
+    });
+    for (const viewer of tab.viewers) viewer.push({ _tag: "extensionPopup", open: true });
+  };
+
+  const attachExtensionPopupViewer: AttachViewer = (input) => {
+    const popup = extensionPopups.get(tabKey(input.threadId, input.tabId));
+    const gone = new ServerBrowserTabNotFoundError({
+      threadId: input.threadId,
+      tabId: input.tabId,
+    });
+    if (!popup || popup.isClosed()) return Effect.fail(gone);
+    return attachPopupViewer(popup, input, (cause) =>
+      popup.isClosed() ? gone : new ServerBrowserLaunchError({ cause }),
+    );
+  };
+
   const dispatchViewerInput = async (
     tab: ServerTab,
     session: CDPSession,
@@ -3037,6 +3090,19 @@ const make = Effect.gen(function* () {
     if (!message) return;
     const modifiers = modifiersOf(message);
     switch (message.type) {
+      case "extensionAction": {
+        const { extensionId } = message;
+        if (
+          typeof extensionId === "string" &&
+          contextExtensions(tab.page.context()).some(({ id }) => id === extensionId)
+        ) {
+          void openExtensionPopup(tab, extensionId).catch(constVoid);
+        }
+        return;
+      }
+      case "closeExtensionPopup":
+        void extensionPopups.get(tabKey(tab.threadId, tab.tabId))?.close().catch(constVoid);
+        return;
       case "mouse": {
         const action = message.action;
         const type =
@@ -3250,18 +3316,28 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss compacts its backlog. It runs
         // synchronously so an older compaction can never land after a newer one.
-        else if (["gone", "reconnect", "control", "viewport", "fileChooser"].includes(next._tag)) {
+        else if (
+          [
+            "gone",
+            "reconnect",
+            "control",
+            "viewport",
+            "fileChooser",
+            "extensions",
+            "extensionPopup",
+          ].includes(next._tag)
+        ) {
           const dropped = runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
           const items = [...dropped.value, next];
           // Without its latest size and control the viewer cannot map input at all.
-          const state = (["control", "viewport"] as const).flatMap(
+          const stateTags = ["control", "viewport", "extensions", "extensionPopup"] as const;
+          const retained = new Set<string>(stateTags);
+          const state = stateTags.flatMap(
             (tag) => items.findLast((item) => item._tag === tag) ?? [],
           );
           // Everything else is one-time; if it no longer fits, the oldest goes first.
-          const rest = items.filter(
-            (item) => item._tag !== "frame" && item._tag !== "control" && item._tag !== "viewport",
-          );
+          const rest = items.filter((item) => item._tag !== "frame" && !retained.has(item._tag));
           for (const item of [...rest.slice(state.length - VIEWER_OUTPUT_LIMIT), ...state])
             Queue.offerUnsafe(output, item);
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
@@ -3296,6 +3372,14 @@ const make = Effect.gen(function* () {
       yield* Effect.promise(() => tab.control.take(viewer.id));
     }
     broadcastControl(tab);
+    const extensions = contextExtensions(tab.page.context());
+    if (extensions.length > 0) {
+      viewer.push({ _tag: "extensions", extensions });
+      viewer.push({
+        _tag: "extensionPopup",
+        open: extensionPopups.has(tabKey(tab.threadId, tab.tabId)),
+      });
+    }
     pushFileChooser(tab);
     const pushStill = async () => {
       const data = await withCaptureLock(tab, async () => {
@@ -3537,6 +3621,7 @@ const make = Effect.gen(function* () {
 
   return ServerBrowser.of({
     attachViewer,
+    attachExtensionPopupViewer,
     clearProfile,
     profileReporter,
     openDownload,

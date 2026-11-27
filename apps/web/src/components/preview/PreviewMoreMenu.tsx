@@ -1,4 +1,5 @@
 import type { DesktopPreviewColorScheme } from "@t3tools/contracts";
+import type { PreviewStreamExtension } from "@t3tools/client-runtime/preview/server-browser-stream";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { Minus, MoreVertical, Plus as PlusIcon, RotateCcw } from "lucide-react";
 
@@ -53,6 +54,11 @@ interface Props {
   profileName: string | undefined;
   findShortcutLabel?: string | null;
   move?: { readonly label: string; readonly onMove: () => void };
+  extensions?: {
+    readonly items: readonly PreviewStreamExtension[];
+    readonly onAction: (id: string) => void;
+    readonly disabled: boolean;
+  };
 }
 
 const MenuTriggerButton = () => {
@@ -62,6 +68,7 @@ const MenuTriggerButton = () => {
       <TooltipTrigger
         render={
           <MenuTrigger
+            data-extension-popup-anchor=""
             render={
               <Button
                 variant="ghost"
@@ -93,6 +100,7 @@ export function PreviewMoreMenu({
   profileName,
   findShortcutLabel,
   move,
+  extensions,
 }: Props) {
   const gt = useGT();
   const m = useMessages();
@@ -101,7 +109,7 @@ export function PreviewMoreMenu({
   return (
     <Menu>
       <MenuTriggerButton />
-      <MenuPopup align="end" sideOffset={6}>
+      <MenuPopup align="end" sideOffset={6} data-extension-popup-anchor="">
         {actions.find ? (
           <MenuItem onClick={actions.find} disabled={disabled}>
             <T>Find on page</T>
@@ -124,6 +132,20 @@ export function PreviewMoreMenu({
           </MenuItem>
         ) : null}
         {move ? <MenuItem onClick={move.onMove}>{move.label}</MenuItem> : null}
+        {extensions && extensions.items.length > 0 ? (
+          <MenuSub>
+            <MenuSubTrigger disabled={disabled || extensions.disabled}>
+              <T>Extensions</T>
+            </MenuSubTrigger>
+            <MenuSubPopup data-extension-popup-anchor="">
+              {extensions.items.map(({ id, name }) => (
+                <MenuItem key={id} onClick={() => extensions.onAction(id)}>
+                  {name}
+                </MenuItem>
+              ))}
+            </MenuSubPopup>
+          </MenuSub>
+        ) : null}
         <MenuItem onClick={onToggleDeviceToolbar} disabled={disabled}>
           {deviceToolbarVisible ? gt("Hide device toolbar") : gt("Show device toolbar")}
         </MenuItem>

@@ -42,6 +42,8 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import * as ServerBrowserExtensionPopup from "./ServerBrowserExtensionPopup.ts";
+import * as ServerBrowserExtensions from "./ServerBrowserExtensions.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
@@ -64,6 +66,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
         };
       }
       contexts.push(context);
+      if (isolationKey === undefined) extensionContextReady?.(context);
       return context as unknown as BrowserContext;
     }
     async scratchPage() {
@@ -115,7 +118,12 @@ function makeSession(
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
-      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          cssVisualViewport: { pageX: 0, pageY: 0 },
+          cssLayoutViewport: { clientWidth: viewport.width, clientHeight: viewport.height },
+        };
+      }
       if (method === "Page.captureScreenshot") {
         if ((input as { format: string }).format === "jpeg" && heldStill) await heldStill();
         // A snapshot sizes its screenshot from the PNG header; viewers get JPEG frames as-is.
@@ -176,6 +184,7 @@ function fileChooserElement(accept: string) {
 
 function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "about:blank") {
   const events = new NodeEvents.EventEmitter();
+  const contextEvents = new NodeEvents.EventEmitter();
   const nativeFileChooser = vi.fn();
   const setChooserFiles = vi.fn(async (_files: unknown) => {});
   const sessions: ReturnType<typeof makeSession>[] = [];
@@ -207,6 +216,7 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
     setDefaultTimeout: vi.fn(),
     setDefaultNavigationTimeout: vi.fn(),
     context: () => context,
+    opener: vi.fn(async (): Promise<unknown> => null),
     mainFrame: () => page,
     frames: () => [page],
     url: () => url,
@@ -288,15 +298,26 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
       events.emit("dialog", dialog);
     }),
   };
+  const pages = [page];
   const context = {
     page,
     sessions,
     cssViewport,
+    on: (name: string, callback: (...args: unknown[]) => void) => contextEvents.on(name, callback),
+    emitAsync: (name: string, ...args: unknown[]) =>
+      Promise.all(contextEvents.listeners(name).map((listener) => listener(...args))),
+    pages: (): Array<typeof page> => pages.filter((candidate) => !candidate.isClosed()),
+    addPage: (candidate: typeof page) => {
+      candidate.context = () => context;
+      pages.push(candidate);
+    },
     newPage: async () => page as unknown as Page,
     grantPermissions: vi.fn(async () => {}),
     newCDPSession: async (target: unknown) => {
       const session = makeSession(
-        target === page ? undefined : (target as ReturnType<typeof makeFrame>),
+        pages.some((candidate) => candidate === target)
+          ? undefined
+          : (target as ReturnType<typeof makeFrame>),
         cssViewport,
       );
       sessions.push(session);
@@ -307,7 +328,7 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
       if (contextClosed) return;
       contextClosed = true;
       context.closing.resolve();
-      await page.close();
+      await Promise.all(pages.map((candidate) => candidate.close()));
       onClose?.(context as unknown as BrowserContext);
     }),
   };
@@ -390,6 +411,7 @@ function makeEncoderPage() {
 const contexts: ReturnType<typeof makeContext>[] = [];
 let encoderPageOverride: Page | undefined;
 let realContextOverride: BrowserContext | undefined;
+let extensionContextReady: ((context: ReturnType<typeof makeContext>) => void) | undefined;
 const encoderStreams: Array<{ frameRate: number | undefined; bitsPerSecond: number }> = [];
 let decodeGate: PromiseWithResolvers<void> | null = null;
 const contextRequests: Array<{ profileId: string; isolated: boolean }> = [];
@@ -595,6 +617,7 @@ beforeEach(() => {
   contexts.length = 0;
   encoderPageOverride = undefined;
   realContextOverride = undefined;
+  extensionContextReady = undefined;
   encoderStreams.length = 0;
   decodeGate = null;
   contextRequests.length = 0;
@@ -4192,6 +4215,220 @@ it.effect("a popup opens in its opener's appearance", () =>
       expect(event.snapshot.colorScheme).toBe("dark");
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([true, false])(
+  "opens extension pages for the user (before first tab: %s)",
+  (early) =>
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      const welcomeUrl = "chrome-extension://test/welcome.html";
+      const welcome = makeContext(undefined, welcomeUrl).page;
+      extensionContextReady = (context) => {
+        if (!early) return;
+        context.addPage(welcome);
+        const setSize = context.page.setViewportSize.getMockImplementation()!;
+        context.page.setViewportSize.mockImplementationOnce(async (size) => {
+          await context.emitAsync("page", welcome);
+          await setSize(size);
+        });
+      };
+      yield* Effect.yieldNow;
+      const events = yield* manager.subscribeEvents;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { profileId: "default", show: false },
+      });
+      const homeId = PreviewTabId.make(opened.tabId!);
+      const context = contexts[0]!;
+      const notifiedTabId = early
+        ? undefined
+        : yield* Effect.scoped(
+            Effect.gen(function* () {
+              const viewer = yield* browser.attachViewer(viewerInput(homeId, true));
+              yield* viewer.input({ type: "takeControl" });
+              context.addPage(welcome);
+              yield* Effect.promise(() => context.emitAsync("page", welcome));
+              let message = yield* Queue.take(viewer.output);
+              while (message._tag !== "popup") message = yield* Queue.take(viewer.output);
+              return message.tabId;
+            }),
+          );
+      let loaded = yield* PubSub.take(events);
+      while (
+        loaded.type !== "navigated" ||
+        loaded.snapshot.navStatus._tag !== "Success" ||
+        loaded.snapshot.navStatus.url !== welcomeUrl
+      ) {
+        loaded = yield* PubSub.take(events);
+      }
+      const tabId = PreviewTabId.make(loaded.tabId);
+      if (!early) expect(notifiedTabId).toBe(tabId);
+      expect(loaded.threadId).toBe(scope.thread.threadId);
+      expect(loaded.snapshot.profileId).toBe("default");
+      expect(loaded.snapshot).not.toHaveProperty("automationOwner");
+      expect(loaded.snapshot).not.toHaveProperty("reveal", false);
+      const denied = {
+        _tag: "PreviewAutomationExecutionError",
+        reason: expect.stringContaining("preview_open"),
+      };
+      for (const operation of ["status", "open", "snapshot", "close"] as const) {
+        expect(
+          yield* broker.invoke<void>({ scope, tabId, operation, input: {} }).pipe(Effect.flip),
+        ).toMatchObject(denied);
+      }
+      const status = broker.invoke<PreviewAutomationStatus>({
+        scope: asSession("unassigned"),
+        operation: "status",
+        input: {},
+      });
+      expect(yield* status).toMatchObject({
+        tabId: homeId,
+        tabs: [expect.objectContaining({ tabId: homeId })],
+      });
+
+      const child = makeContext(undefined, "chrome-extension://test/child.html").page;
+      child.opener.mockResolvedValue(welcome);
+      context.addPage(child);
+      yield* Effect.promise(() =>
+        Promise.all([context.emitAsync("page", child), welcome.emitAsync("popup", child)]),
+      );
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(3);
+      const childTabId = PreviewTabId.make(
+        sessions.find((session) => session.tabId !== homeId && session.tabId !== tabId)!.tabId,
+      );
+      child.commit("https://example.test/");
+      expect(
+        yield* broker
+          .invoke<void>({ scope, tabId: childTabId, operation: "status", input: {} })
+          .pipe(Effect.flip),
+      ).toMatchObject(denied);
+      yield* broker.invoke({ scope, tabId: homeId, operation: "close", input: {} });
+      expect(welcome.isClosed()).toBe(false);
+      expect(yield* status).toMatchObject({ available: false, tabId: null });
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect(
+  "only the controlling viewer can open and close an installed extension popup outside the tab list",
+  () =>
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const context = contexts[0]!;
+      const extension = { id: "test", name: "Popup Probe" };
+      using _extensions = vi
+        .spyOn(ServerBrowserExtensions, "contextExtensions")
+        .mockReturnValue([extension]);
+      const attaching = Promise.withResolvers<void>();
+      using trigger = vi
+        .spyOn(ServerBrowserExtensionPopup, "triggerExtensionAction")
+        .mockImplementation(async (_context, _page, _id, excludeFromTabAdoption) => {
+          await attaching.promise;
+          const popup = makeContext(undefined, "chrome-extension://test/popup.html").page;
+          context.addPage(popup);
+          const page = popup as unknown as Page;
+          excludeFromTabAdoption(page);
+          await context.emitAsync("page", popup);
+          return page;
+        });
+      const controlling = yield* browser.attachViewer(viewerInput(tabId, true));
+      const other = yield* browser.attachViewer(viewerInput(tabId, true));
+      const readOnly = yield* browser.attachViewer(viewerInput(tabId, false));
+      const extensions = yield* Queue.take(controlling.output).pipe(
+        Effect.repeat({ until: (message) => message._tag === "extensions" }),
+      );
+      expect(extensions).toEqual({ _tag: "extensions", extensions: [extension] });
+
+      const action = { type: "extensionAction", extensionId: extension.id };
+      yield* controlling.input({ type: "takeControl" });
+      yield* controlling.input({ ...action, extensionId: "unknown" });
+      yield* other.input(action);
+      yield* readOnly.input(action);
+      expect(trigger).not.toHaveBeenCalled();
+
+      yield* controlling.input(action);
+      expect(trigger).toHaveBeenCalledOnce();
+      attaching.resolve();
+      const nextPopup = (viewer: ServerBrowser.ServerBrowserViewer, open: boolean) =>
+        Queue.take(viewer.output).pipe(
+          Effect.repeat({
+            until: (message) => message._tag === "extensionPopup" && message.open === open,
+          }),
+        );
+      yield* nextPopup(controlling, true);
+      yield* nextPopup(other, true);
+      yield* nextPopup(readOnly, true);
+      const list = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(list.sessions.map((session) => session.tabId)).toEqual([tabId]);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.tabs?.map((tab) => tab.tabId)).toEqual([tabId]);
+
+      const closePopup = { type: "closeExtensionPopup" };
+      yield* other.input(closePopup);
+      yield* readOnly.input(closePopup);
+      const attached = yield* browser.attachExtensionPopupViewer(viewerInput(tabId, true));
+      yield* controlling.input(action);
+      expect(trigger).toHaveBeenCalledOnce();
+      yield* nextPopup(controlling, false);
+      expect(
+        yield* Queue.take(attached.output).pipe(
+          Effect.repeat({ until: (message) => message._tag === "gone" }),
+        ),
+      ).toEqual({ _tag: "gone" });
+      expect(
+        yield* browser.attachExtensionPopupViewer(viewerInput(tabId, true)).pipe(Effect.flip),
+      ).toBeInstanceOf(ServerBrowser.ServerBrowserTabNotFoundError);
+
+      yield* controlling.input(action);
+      expect(trigger).toHaveBeenCalledTimes(2);
+      yield* nextPopup(controlling, true);
+      yield* controlling.input(closePopup);
+      yield* nextPopup(controlling, false);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect("blocks the next operation after an agent navigates to an extension", () =>
+  Effect.gen(function* () {
+    const { broker, tabId } = yield* ready;
+    const { page, sessions } = contexts[0]!;
+    const cdp = sessions[0]!;
+    const extensionUrl = "chrome-extension://test/inline.html";
+    const expression = `location.href = ${JSON.stringify(extensionUrl)}`;
+    const send = cdp.send.getMockImplementation()!;
+    cdp.send.mockImplementation((method, input) => {
+      if (
+        method === "Runtime.evaluate" &&
+        (input as { expression: string }).expression === expression
+      ) {
+        page.commit(extensionUrl);
+      }
+      return send(method, input);
+    });
+    yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression } });
+    expect(
+      yield* broker
+        .invoke<void>({
+          scope,
+          tabId,
+          operation: "evaluate",
+          input: { expression: "document.title" },
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({
+      _tag: "PreviewAutomationExecutionError",
+      reason: expect.stringContaining("preview_open"),
+    });
+  }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
 it.live("a page's title change without navigation reaches its session", () =>
