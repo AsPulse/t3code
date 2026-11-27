@@ -98,6 +98,8 @@ export class AnalyticsService extends Context.Service<
       owners: ReadonlyArray<TelemetryOwner>,
       observedBy: "server" | "client",
     ) => Effect.Effect<void>;
+
+    readonly enabled: Effect.Effect<boolean>;
   }
 >()("t3/telemetry/AnalyticsService") {}
 
@@ -145,7 +147,10 @@ export const make = Effect.gen(function* () {
   });
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
-  const { distinctId, installId } = yield* getTelemetryIdentity;
+  const identityContext = yield* Effect.context<Effect.Services<typeof getTelemetryIdentity>>();
+  const telemetryIdentity = yield* Effect.cached(
+    getTelemetryIdentity.pipe(Effect.provideContext(identityContext)),
+  );
   const crypto = yield* SecureRandom.SecureRandom;
   const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
   const deliveryRef = yield* Ref.make<DeliveryState>({
@@ -199,7 +204,9 @@ export const make = Effect.gen(function* () {
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    if (!(yield* telemetryEnabled) || !distinctId) return;
+    if (!(yield* telemetryEnabled)) return;
+    const { distinctId, installId } = yield* telemetryIdentity;
+    if (!distinctId) return;
 
     const payload = {
       api_key: telemetryConfig.posthogKey,
@@ -311,7 +318,9 @@ export const make = Effect.gen(function* () {
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
-      if (!(yield* telemetryEnabled) || !distinctId) return;
+      if (!(yield* telemetryEnabled)) return;
+      const { distinctId } = yield* telemetryIdentity;
+      if (!distinctId) return;
 
       // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
       const uuid = yield* Effect.exit(crypto.uuidV7());
@@ -358,7 +367,7 @@ export const make = Effect.gen(function* () {
     flush.pipe(Effect.timeout(SHUTDOWN_FLUSH_TIMEOUT), Effect.ignore),
   );
 
-  return AnalyticsService.of({ record, flush, recordOwners });
+  return AnalyticsService.of({ record, flush, recordOwners, enabled: telemetryEnabled });
 });
 
 export const layer = Layer.effect(AnalyticsService, make);
