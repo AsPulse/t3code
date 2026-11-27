@@ -15,6 +15,7 @@ import {
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadIssueKeysEqual } from "@t3tools/contracts";
 import { canonicalizeGitCafePullRequestUrl } from "@t3tools/source-control-definitions/registry";
+import { readRotationHandoff } from "../bot/BotContextRotation.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import {
   normalizeThreadPullRequestKey,
@@ -2678,7 +2679,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
       const followsCurrent = followsCurrentConversation(queuedMessage);
-      const freshContext = queuedRun.freshContext === true;
+      const freshContext =
+        queuedRun.freshContext === true ||
+        (queuedMessage.scheduledTaskId === undefined &&
+          queuedMessage.maintenance === undefined &&
+          (yield* readRotationHandoff(projectionStore, projection, ordinal).pipe(
+            Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+          )) !== null);
       // A scheduled fresh run is a side conversation, so it must not drop the fork's context.
       const supersededForkTransfer =
         freshContext && queuedMessage.scheduledTaskId === undefined
@@ -3034,6 +3041,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : "automatic-queue";
       const startingRun: OrchestrationV2Run = {
         ...queuedRun,
+        ...(freshContext ? { freshContext: true } : {}),
         providerThreadId: queuedProviderThread.id,
         ordinal,
         status: "starting",
@@ -3085,6 +3093,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(queuedMessage.idleCompaction === undefined
             ? {}
             : { idleCompaction: queuedMessage.idleCompaction }),
+          ...(queuedMessage.maintenance === undefined
+            ? {}
+            : { maintenance: queuedMessage.maintenance }),
         }),
         ...(freshContext ? { freshContext: true } : {}),
         providerThreadId: queuedProviderThread.id,
@@ -4010,6 +4021,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       worktreePath: command.worktreePath,
       activeProviderThreadId: null,
       pullRequests: [],
+      ...(command.tags?.length ? { tags: [...new Set(command.tags)] } : {}),
       ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
       // Only stamped work names a remote parent, so a client cannot claim one.
       ...(command.linkOrigin === undefined || command.delegatedFrom === undefined
@@ -6218,7 +6230,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       OrchestrationV2Command,
       { readonly type: "message.dispatch" | "queued-message.promote-to-steer" }
     >,
-    message: Pick<OrchestrationV2ConversationMessage, "text" | "attachments" | "context">,
+    message: Pick<
+      OrchestrationV2ConversationMessage,
+      "text" | "attachments" | "context" | "maintenance"
+    >,
   ) {
     if (
       expandAssistantCitationsForProvider(message.text).length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
@@ -6227,6 +6242,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Message exceeds ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS.toLocaleString("en-US")} characters after expanding quotes. Shorten it and try again.`,
+      });
+    }
+    if (message.maintenance !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Context rotation must run as a separate turn.",
       });
     }
     if (isNativeMaintenanceCommand(message)) {
@@ -6281,6 +6303,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly linkedSender?: OrchestrationV2ConversationMessage["linkedSender"];
     readonly idleCompaction?: OrchestrationV2ConversationMessage["idleCompaction"];
+    readonly maintenance?: OrchestrationV2ConversationMessage["maintenance"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly forceRestart: boolean;
@@ -6297,6 +6320,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const targetMessage = input.projection.messages.find(
       (message) => message.id === targetRun.userMessageId,
     );
+    if (targetMessage?.maintenance !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: input.command.commandId,
+        commandType: input.command.type,
+        cause: "Wait for context rotation to finish before steering the thread.",
+      });
+    }
     if (targetMessage !== undefined && isNativeMaintenanceCommand(targetMessage)) {
       return yield* new OrchestratorDispatchError({
         commandId: input.command.commandId,
@@ -6427,6 +6457,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
           ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
           ...(input.idleCompaction === undefined ? {} : { idleCompaction: input.idleCompaction }),
+          ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
           id: input.messageId,
           threadId: input.command.threadId,
           runId: messageInput.runId,
@@ -6448,6 +6479,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
           ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
           ...(input.idleCompaction === undefined ? {} : { idleCompaction: input.idleCompaction }),
+          ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
           id: idAllocator.derive.userTurnItem({ messageId: input.messageId }),
           threadId: input.command.threadId,
           runId: messageInput.runId,
@@ -7073,13 +7105,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
-    // A compacted thread reads every run, but attempts, nodes, messages, provider turns and prompts
-    // only for its recent runs and the runs this command names. An idle compaction reads in full:
-    // its busy check below looks for a delegated result's message under any old run.
+    // The maintenance busy check can look for a delegated result under any old run.
+    const idleMaintenance =
+      command.idleCompaction === "beforeCacheExpires" ||
+      (command.maintenance !== undefined && command.dispatchMode.type === "start_immediately");
     let projection = yield* getProjectionWithPendingEvents(
       command.threadId,
       events,
-      command.idleCompaction === undefined
+      !idleMaintenance && command.idleCompaction === undefined
         ? {
             keepRunIds: [
               command.manualContinuationOfRunId,
@@ -7245,7 +7278,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // The service checked idleness before this command; a run or a delegated result that landed
     // since makes the thread busy, and that turn refreshes the cache anyway.
     if (
-      command.idleCompaction === "beforeCacheExpires" &&
+      idleMaintenance &&
       projection.runs.some(
         (run) =>
           run.status === "queued" ||
@@ -7269,7 +7302,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return;
     }
 
-    if (projection.thread.lastVisitedAt === null && !isNativeMaintenanceCommand(command)) {
+    if (
+      projection.thread.lastVisitedAt === null &&
+      command.maintenance === undefined &&
+      !isNativeMaintenanceCommand(command)
+    ) {
       const now = yield* DateTime.now;
       // Null keeps imported history read. The first fresh dispatch establishes
       // a read watermark so its completion can be unread on every client.
@@ -7471,12 +7508,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       dispatchMode = { type: "start_immediately" };
     }
-    const freshContext = command.freshContext === true;
-    if (
-      freshContext &&
-      (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active")
-    ) {
-      dispatchMode = { type: "queue_after_active" };
+    const freshContext =
+      command.freshContext === true ||
+      (command.scheduledTaskId === undefined &&
+        command.maintenance === undefined &&
+        !projection.runs.some(isActiveRun) &&
+        (yield* readRotationHandoff(projectionStore, projection, nextRunOrdinal(projection)).pipe(
+          mapDispatchError(command),
+        )) !== null);
+    if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
+      const targetRunId = dispatchMode.targetRunId;
+      const target = projection.runs.find((run) => run.id === targetRunId);
+      if (
+        freshContext ||
+        projection.messages.some(
+          (message) => message.id === target?.userMessageId && message.maintenance !== undefined,
+        )
+      ) {
+        dispatchMode = { type: "queue_after_active" };
+      }
     }
     // Native goal commands must not steer an existing turn.
     const parsedGoalCommand = parseGoalCommand(command);
@@ -7510,6 +7560,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         if (
           isLiveRun(target) &&
           goalCommandStopsActiveRun(goalCommand, goal?.status ?? null) &&
+          targetMessage?.maintenance === undefined &&
           (targetMessage === undefined || !isNativeMaintenanceCommand(targetMessage)) &&
           !(yield* stopReachedRun(command, command.threadId, target.id))
         ) {
@@ -7657,6 +7708,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         activeTurn !== undefined &&
         providerThread?.providerSessionId != null &&
         (!commandNotice || providerThread.goal?.status === "active") &&
+        activeMessage?.maintenance === undefined &&
         (activeMessage === undefined || !isNativeMaintenanceCommand(activeMessage))
       ) {
         const session = yield* providerSessions
@@ -7793,6 +7845,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
         forceRestart: dispatchMode.type === "restart_active",
       });
       return;
@@ -8097,6 +8150,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -8521,6 +8575,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -8547,6 +8602,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
         id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
         threadId: command.threadId,
         runId,
@@ -9334,6 +9390,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
       ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+      ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
       id: command.messageId,
       threadId: command.threadId,
       runId,
@@ -9357,6 +9414,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
       ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+      ...(command.maintenance === undefined ? {} : { maintenance: command.maintenance }),
       id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
       threadId: command.threadId,
       runId,
@@ -11825,6 +11883,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         target !== undefined &&
         isLiveRun(target) &&
         goalCommandStopsActiveRun(goalCommand, goal?.status ?? null) &&
+        targetMessage?.maintenance === undefined &&
         (targetMessage === undefined || !isNativeMaintenanceCommand(targetMessage)) &&
         !(yield* stopReachedRun(command, command.threadId, target.id));
       return yield* stopRunForQueuedCommand({
@@ -11937,6 +11996,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedMessage.idleCompaction === undefined
         ? {}
         : { idleCompaction: queuedMessage.idleCompaction }),
+      ...(queuedMessage.maintenance === undefined
+        ? {}
+        : { maintenance: queuedMessage.maintenance }),
       forceRestart: false,
     });
   });

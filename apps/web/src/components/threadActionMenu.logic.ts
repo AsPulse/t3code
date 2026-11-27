@@ -8,6 +8,8 @@ export type ThreadActionMenuId =
   | "find"
   | "new-thread-on-branch"
   | "filter-by-project"
+  | "move-to-work"
+  | "move-to-bots"
   | "turn-into-project"
   | "project-settings"
   | "pin"
@@ -95,6 +97,7 @@ export function buildDraftActionMenuItems(
 
 export interface ThreadActionMenuState {
   readonly canOperate: boolean;
+  readonly botMove?: "move-to-work" | "move-to-bots" | null;
   readonly canFind?: boolean;
   /** False where no inline title editor is rendered, such as sidebar search results. */
   readonly canRename?: boolean;
@@ -231,6 +234,19 @@ export function buildThreadActionMenuItems(
               ? resolve(msg("Show all projects"))
               : resolve(msg("Filter by {project}", { project: state.projectFilter.label })),
             icon: "folder-tree",
+          },
+        ]
+      : []),
+    ...(state.botMove
+      ? [
+          {
+            id: state.botMove,
+            label: resolve(
+              state.botMove === "move-to-work"
+                ? msg("Move to Work sidebar")
+                : msg("Move to Bots sidebar"),
+            ),
+            icon: "bot",
           },
         ]
       : []),

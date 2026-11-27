@@ -33,6 +33,13 @@ import {
   ChatGptHandoffInput,
   ChatGptHandoffState,
 } from "./providerSetup.ts";
+import {
+  BotDeleteInput,
+  BotRegistryError,
+  BotUpsertInput,
+  BotWorkspaceResult,
+  BotWorkspaceSetInput,
+} from "./botWorkspace.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -551,6 +558,9 @@ export const WS_METHODS = {
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  botsSetWorkspace: "bots.setWorkspace",
+  botsUpsert: "bots.upsert",
+  botsDelete: "bots.delete",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverCheckSecretSource: "server.checkSecretSource",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
@@ -921,6 +931,23 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
   }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const botRegistryRpc = {
+  success: BotWorkspaceResult,
+  error: Schema.Union([BotRegistryError, EnvironmentAuthorizationError]),
+};
+const WsBotsSetWorkspaceRpc = Rpc.make(WS_METHODS.botsSetWorkspace, {
+  ...botRegistryRpc,
+  payload: BotWorkspaceSetInput,
+});
+const WsBotsUpsertRpc = Rpc.make(WS_METHODS.botsUpsert, {
+  ...botRegistryRpc,
+  payload: BotUpsertInput,
+});
+const WsBotsDeleteRpc = Rpc.make(WS_METHODS.botsDelete, {
+  ...botRegistryRpc,
+  payload: BotDeleteInput,
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -2301,6 +2328,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetSettingsRpc,
   WsServerReclaimDatabaseSpaceRpc,
   WsServerUpdateSettingsRpc,
+  WsBotsSetWorkspaceRpc,
+  WsBotsUpsertRpc,
+  WsBotsDeleteRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
