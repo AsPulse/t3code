@@ -6,6 +6,7 @@ import {
   type PreviewStreamClient,
   type PreviewStreamControl,
   type PreviewStreamDownload,
+  type PreviewStreamExtension,
   type PreviewStreamFileChooser,
   uploadPreviewStreamFiles,
   type PreviewStreamInput,
@@ -51,6 +52,7 @@ export interface ServerBrowserHandle {
   readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
   readonly stopLoading: () => void;
   readonly viewport: (setting: PreviewViewportSetting) => void;
+  readonly extensionAction: (id: string) => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
 
@@ -157,6 +159,9 @@ export function ServerBrowserSurface(props: {
   readonly onViewport?: (viewport: PreviewStreamViewport) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
   readonly onPopup?: (tabId: string) => void;
+  readonly extensionPopup?: boolean;
+  readonly onExtensions?: (extensions: readonly PreviewStreamExtension[]) => void;
+  readonly onExtensionPopup?: (open: boolean) => void;
   readonly className?: string;
   readonly pdfUrl?: string | null;
   readonly ref?: Ref<ServerBrowserHandle>;
@@ -173,6 +178,9 @@ export function ServerBrowserSurface(props: {
     onViewport,
     onControl,
     onPopup,
+    extensionPopup = false,
+    onExtensions,
+    onExtensionPopup,
     className,
     pdfUrl = null,
     ref,
@@ -231,6 +239,10 @@ export function ServerBrowserSurface(props: {
   );
   const controlChanged = useEffectEvent((next: PreviewStreamControl | null) => onControl?.(next));
   const popupOpened = useEffectEvent((popupTabId: string) => onPopup?.(popupTabId));
+  const extensionsChanged = useEffectEvent((extensions: readonly PreviewStreamExtension[]) =>
+    onExtensions?.(extensions),
+  );
+  const extensionPopupChanged = useEffectEvent((open: boolean) => onExtensionPopup?.(open));
   const [cap, setCap] = useState<{ width: number; height: number } | null>(null);
 
   // Keep clearInput stable: a new identity reconnects the stream.
@@ -325,6 +337,7 @@ export function ServerBrowserSurface(props: {
         send({ type: "reload", ...(options?.ignoreCache ? { ignoreCache: true } : {}) }),
       stopLoading: () => send({ type: "stopLoading" }),
       viewport: (setting) => send({ type: "viewport", setting }),
+      extensionAction: (extensionId) => send({ type: "extensionAction", extensionId }),
       canvas: () => (!pdfUrl && hasFrameRef.current ? canvasRef.current : null),
     }),
     [pdfUrl, send],
@@ -394,7 +407,7 @@ export function ServerBrowserSurface(props: {
       firstFrame();
     });
     const client = createPreviewStreamClient(
-      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
+      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height, extensionPopup },
       {
         onFrame: (jpeg) => {
           unauthorizedRef.current = 0;
@@ -419,6 +432,8 @@ export function ServerBrowserSurface(props: {
         onClipboard: (text) => void copyPageText(text),
         onDownload: offerDownload,
         onPopup: popupOpened,
+        onExtensions: extensionsChanged,
+        onExtensionPopup: extensionPopupChanged,
         onFileChooser: setFileChooser,
         onViewport: (viewport) => {
           viewportRef.current = viewport;
@@ -452,6 +467,8 @@ export function ServerBrowserSurface(props: {
             return;
           }
           setFileChooser(null);
+          extensionsChanged([]);
+          extensionPopupChanged(false);
           controlRef.current = null;
           setControl(null);
           controlChanged(null);
@@ -478,6 +495,8 @@ export function ServerBrowserSurface(props: {
       clearNoFrameTimer();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
       client.stop();
+      extensionsChanged([]);
+      extensionPopupChanged(false);
       if (clientRef.current === client) clientRef.current = null;
       controlRef.current = null;
       setControl(null);
@@ -490,6 +509,7 @@ export function ServerBrowserSurface(props: {
     cap,
     clearInput,
     environmentId,
+    extensionPopup,
     followSize,
     hostSetup,
     tabId,
@@ -779,6 +799,7 @@ export function ServerBrowserSurface(props: {
         className={cn(
           "visible relative z-20 flex shrink-0 items-center justify-between gap-2 border-border bg-background px-2 py-1",
           controlPosition === "bottom" ? "order-last border-t" : "border-b",
+          extensionPopup && "hidden",
         )}
       >
         <span role="status" className="text-xs text-muted-foreground">

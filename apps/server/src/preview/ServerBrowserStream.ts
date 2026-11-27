@@ -83,27 +83,29 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
   const sessions = yield* SessionStore.SessionStore;
   const stream = Effect.scoped(
     Effect.gen(function* () {
-      const attached = yield* browser
-        .attachViewer({
-          threadId,
-          tabId,
-          canOperate,
-          maxWidth: intParam(params, "maxWidth", 1280, 7680),
-          maxHeight: intParam(params, "maxHeight", 800, 4320),
-          quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
-        })
-        .pipe(
-          Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
-          Effect.catchTags({
-            ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
-            ServerBrowserLaunchError: (error) => {
-              const setup = hostSetup(error.cause);
-              return setup === undefined
-                ? Effect.fail(error)
-                : Effect.succeed({ _tag: "hostSetup" as const, reason: encodeHostSetup(setup) });
-            },
-          }),
-        );
+      const attachViewer =
+        params.get("extensionPopup") === "1"
+          ? browser.attachExtensionPopupViewer
+          : browser.attachViewer;
+      const attached = yield* attachViewer({
+        threadId,
+        tabId,
+        canOperate,
+        maxWidth: intParam(params, "maxWidth", 1280, 7680),
+        maxHeight: intParam(params, "maxHeight", 800, 4320),
+        quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
+      }).pipe(
+        Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
+        Effect.catchTags({
+          ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
+          ServerBrowserLaunchError: (error) => {
+            const setup = hostSetup(error.cause);
+            return setup === undefined
+              ? Effect.fail(error)
+              : Effect.succeed({ _tag: "hostSetup" as const, reason: encodeHostSetup(setup) });
+          },
+        }),
+      );
       const incoming = NodeHttpServerRequest.toIncomingMessage(request);
       // JPEGs are already compressed. Disabling deflate also keeps all
       // pending writes in the socket buffer we bound below, not a zlib queue.
@@ -164,6 +166,8 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
             case "fileChooser":
             case "fileChooserClosed":
             case "popup":
+            case "extensions":
+            case "extensionPopup":
             case "pointer":
             case "probe": {
               const { _tag: type, ...data } = output;

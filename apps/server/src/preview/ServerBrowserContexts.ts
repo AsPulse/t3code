@@ -5,7 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import type { Browser, BrowserContext, CDPSession } from "playwright-core";
+import type { Browser, BrowserContext, CDPSession, Page } from "playwright-core";
 
 import { sandboxDisabled } from "./PreviewBrowserHost.ts";
 import { extensionPaths, isExtensionUrl, loadExtensions } from "./ServerBrowserExtensions.ts";
@@ -22,21 +22,33 @@ interface CdpSession {
   createChildSession(...args: ReadonlyArray<unknown>): CdpSession;
 }
 
+const playwrightImpl = (client: Browser | BrowserContext | Page) => {
+  const { _connection: connection } = client as unknown as {
+    readonly _connection?: {
+      readonly toImpl?: (client: unknown) =>
+        | {
+            readonly _session?: CdpSession;
+            readonly _browser?: { readonly _session?: CdpSession };
+            readonly delegate?: { readonly _targetId?: string };
+          }
+        | undefined;
+    };
+  };
+  return connection?.toImpl?.(client);
+};
+
+export const playwrightRootSession = (client: Browser | BrowserContext) => {
+  const impl = playwrightImpl(client);
+  return impl?._browser?._session ?? impl?._session;
+};
+
+export const playwrightPageTargetId = (page: Page) => playwrightImpl(page)?.delegate?._targetId;
+
 // The headless shell binds no BadgeService for service workers and kills the renderer of a
 // worker that calls navigator.setAppBadge. Playwright resumes each worker itself, so the stub
 // can only go in ahead of that resume through its in-process session; without it nothing is stubbed.
 const stubWorkerBadges = (client: Browser | BrowserContext) => {
-  const { _connection: connection } = client as unknown as {
-    readonly _connection?: {
-      readonly toImpl?: (
-        client: unknown,
-      ) =>
-        | { readonly _session?: CdpSession; readonly _browser?: { readonly _session?: CdpSession } }
-        | undefined;
-    };
-  };
-  const impl = connection?.toImpl?.(client);
-  const root = impl?._browser?._session ?? impl?._session;
+  const root = playwrightRootSession(client);
   if (!root) return;
   const createChildSession = root.createChildSession.bind(root);
   root.createChildSession = (...args) => {

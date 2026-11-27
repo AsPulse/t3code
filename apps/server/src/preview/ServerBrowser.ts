@@ -96,9 +96,16 @@ import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import {
   assertAgentCanAccessTab,
+  contextExtensions,
   isExtensionTab,
   isExtensionUrl,
+  type ServerBrowserExtension,
 } from "./ServerBrowserExtensions.ts";
+import {
+  attachExtensionPopupViewer as attachPopupViewer,
+  triggerExtensionAction,
+} from "./ServerBrowserExtensionPopup.ts";
+import { asRecord, editingCommand, modifiersOf, num } from "./ServerBrowserInput.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
 
@@ -256,6 +263,8 @@ export type ServerBrowserViewerOutput =
     }
   | { readonly _tag: "fileChooserClosed"; readonly id: string }
   | { readonly _tag: "popup"; readonly tabId: string }
+  | { readonly _tag: "extensions"; readonly extensions: readonly ServerBrowserExtension[] }
+  | { readonly _tag: "extensionPopup"; readonly open: boolean }
   | {
       readonly _tag: "download";
       readonly id: string;
@@ -272,21 +281,24 @@ export interface ServerBrowserViewer {
 
 export type ProfileReporter = (input: PreviewReportProfilesInput) => Effect.Effect<void>;
 
+type AttachViewer = (input: {
+  readonly threadId: string;
+  readonly tabId: string;
+  readonly maxWidth: number;
+  readonly maxHeight: number;
+  readonly quality: number;
+  readonly canOperate: boolean;
+}) => Effect.Effect<
+  ServerBrowserViewer,
+  ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
+  Scope.Scope
+>;
+
 export class ServerBrowser extends Context.Service<
   ServerBrowser,
   {
-    readonly attachViewer: (input: {
-      readonly threadId: string;
-      readonly tabId: string;
-      readonly maxWidth: number;
-      readonly maxHeight: number;
-      readonly quality: number;
-      readonly canOperate: boolean;
-    }) => Effect.Effect<
-      ServerBrowserViewer,
-      ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
-      Scope.Scope
-    >;
+    readonly attachViewer: AttachViewer;
+    readonly attachExtensionPopupViewer: AttachViewer;
 
     readonly answerFileChooser: (input: {
       readonly threadId: string;
@@ -469,39 +481,6 @@ const viewportSettingsEqual = (left: PreviewViewportSetting, right: PreviewViewp
 const fixedViewportSize = (setting: PreviewViewportSetting) =>
   setting._tag === "fill" ? null : { width: setting.width, height: setting.height };
 
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-
-const num = (value: unknown, fallback = 0) =>
-  typeof value === "number" && Number.isFinite(value) ? value : fallback;
-
-const modifiersOf = (message: Record<string, unknown>) => {
-  const value = num(message.modifiers);
-  return Number.isInteger(value) && value >= 0 && value < 16 ? value : 0;
-};
-
-// Linux/headless Chromium needs commands for Cmd editing shortcuts and Ctrl copy/cut.
-const editingCommand = (key: string, modifiers: number) => {
-  const modifier = modifiers & 0b0111;
-  if (modifier !== 2 && modifier !== 4) return null;
-  const lower = key.toLowerCase();
-  const command =
-    lower === "c"
-      ? "copy"
-      : lower === "x"
-        ? "cut"
-        : modifier !== 4
-          ? null
-          : lower === "a"
-            ? "selectAll"
-            : lower === "z"
-              ? modifiers & 8
-                ? "redo"
-                : "undo"
-              : null;
-  return command ? { commands: [command] } : null;
-};
-
 const TITLE_LIMIT = 512;
 const TITLE_WORLD = "t3-preview-title";
 // Observe root replacement without subscribing to body subtree mutations.
@@ -614,6 +593,7 @@ const make = Effect.gen(function* () {
   const closedPendingTabs = new Set<string>();
   const adoptedPages = new Map<string, AdoptedPage>();
   const adoptedBrowserPages = new WeakSet<Page>();
+  const extensionPopups = new Map<string, Page>();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -1025,6 +1005,9 @@ const make = Effect.gen(function* () {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
+    const extensionPopup = extensionPopups.get(key);
+    extensionPopups.delete(key);
+    if (extensionPopup) void extensionPopup.close().catch(constVoid);
     tab.closing = true;
     tab.viewerAttached?.resolve();
     clearAbortedNavigation(tab);
@@ -1723,6 +1706,7 @@ const make = Effect.gen(function* () {
   };
 
   const adoptExtensionPage = async (context: BrowserContext, page: Page) => {
+    if (adoptedBrowserPages.has(page)) return;
     if (!isExtensionUrl(page.url()) || (await page.opener()) !== null) return;
     const contextTabs = [...tabs.values()].filter((tab) => tab.page.context() === context);
     if (contextTabs.some((tab) => tab.page === page)) return;
@@ -3058,6 +3042,39 @@ const make = Effect.gen(function* () {
     viewer.requestedSize = null;
   };
 
+  const openExtensionPopup = async (tab: ServerTab, extensionId: string) => {
+    const popup = await triggerExtensionAction(tab.page.context(), tab.page, extensionId, (page) =>
+      adoptedBrowserPages.add(page),
+    );
+    if (!popup || popup.isClosed()) return;
+    const key = tabKey(tab.threadId, tab.tabId);
+    if (tabs.get(key) !== tab) {
+      await popup.close();
+      return;
+    }
+    const previous = extensionPopups.get(key);
+    extensionPopups.set(key, popup);
+    if (previous) void previous.close().catch(constVoid);
+    popup.once("close", () => {
+      if (extensionPopups.get(key) !== popup) return;
+      extensionPopups.delete(key);
+      for (const viewer of tab.viewers) viewer.push({ _tag: "extensionPopup", open: false });
+    });
+    for (const viewer of tab.viewers) viewer.push({ _tag: "extensionPopup", open: true });
+  };
+
+  const attachExtensionPopupViewer: AttachViewer = (input) => {
+    const popup = extensionPopups.get(tabKey(input.threadId, input.tabId));
+    const gone = new ServerBrowserTabNotFoundError({
+      threadId: input.threadId,
+      tabId: input.tabId,
+    });
+    if (!popup || popup.isClosed()) return Effect.fail(gone);
+    return attachPopupViewer(popup, input, (cause) =>
+      popup.isClosed() ? gone : new ServerBrowserLaunchError({ cause }),
+    );
+  };
+
   const dispatchViewerInput = async (
     tab: ServerTab,
     session: CDPSession,
@@ -3068,6 +3085,16 @@ const make = Effect.gen(function* () {
     if (!message) return;
     const modifiers = modifiersOf(message);
     switch (message.type) {
+      case "extensionAction": {
+        const { extensionId } = message;
+        if (
+          typeof extensionId === "string" &&
+          contextExtensions(tab.page.context()).some(({ id }) => id === extensionId)
+        ) {
+          void openExtensionPopup(tab, extensionId).catch(constVoid);
+        }
+        return;
+      }
       case "mouse": {
         const action = message.action;
         const type =
@@ -3281,18 +3308,28 @@ const make = Effect.gen(function* () {
         if (next._tag === "frame") runFork(next.ack);
         // State a stalled viewer cannot miss compacts its backlog. It runs
         // synchronously so an older compaction can never land after a newer one.
-        else if (["gone", "reconnect", "control", "viewport", "fileChooser"].includes(next._tag)) {
+        else if (
+          [
+            "gone",
+            "reconnect",
+            "control",
+            "viewport",
+            "fileChooser",
+            "extensions",
+            "extensionPopup",
+          ].includes(next._tag)
+        ) {
           const dropped = runSyncExit(Queue.clear(output));
           if (dropped._tag === "Failure") return;
           const items = [...dropped.value, next];
           // Without its latest size and control the viewer cannot map input at all.
-          const state = (["control", "viewport"] as const).flatMap(
+          const stateTags = ["control", "viewport", "extensions", "extensionPopup"] as const;
+          const retained = new Set<string>(stateTags);
+          const state = stateTags.flatMap(
             (tag) => items.findLast((item) => item._tag === tag) ?? [],
           );
           // Everything else is one-time; if it no longer fits, the oldest goes first.
-          const rest = items.filter(
-            (item) => item._tag !== "frame" && item._tag !== "control" && item._tag !== "viewport",
-          );
+          const rest = items.filter((item) => item._tag !== "frame" && !retained.has(item._tag));
           for (const item of [...rest.slice(state.length - VIEWER_OUTPUT_LIMIT), ...state])
             Queue.offerUnsafe(output, item);
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
@@ -3327,6 +3364,14 @@ const make = Effect.gen(function* () {
       yield* Effect.promise(() => tab.control.take(viewer.id));
     }
     broadcastControl(tab);
+    const extensions = contextExtensions(tab.page.context());
+    if (extensions.length > 0) {
+      viewer.push({ _tag: "extensions", extensions });
+      viewer.push({
+        _tag: "extensionPopup",
+        open: extensionPopups.has(tabKey(tab.threadId, tab.tabId)),
+      });
+    }
     pushFileChooser(tab);
     const pushStill = async () => {
       const data = await withCaptureLock(tab, async () => {
@@ -3568,6 +3613,7 @@ const make = Effect.gen(function* () {
 
   return ServerBrowser.of({
     attachViewer,
+    attachExtensionPopupViewer,
     clearProfile,
     profileReporter,
     openDownload,

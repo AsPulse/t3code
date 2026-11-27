@@ -98,7 +98,13 @@ export type PreviewStreamInput =
   | { readonly type: "history"; readonly delta: -1 | 1 }
   | { readonly type: "reload"; readonly ignoreCache?: boolean }
   | { readonly type: "stopLoading" }
+  | { readonly type: "extensionAction"; readonly extensionId: string }
   | { readonly type: "probe"; readonly x: number; readonly y: number };
+
+export interface PreviewStreamExtension {
+  readonly id: string;
+  readonly name: string;
+}
 
 export interface PreviewStreamDownload {
   readonly fileName: string;
@@ -188,6 +194,7 @@ export interface PreviewStreamTarget {
   readonly maxHeight: number;
   /** Passive viewers reduce their own access, including automatic control grants. */
   readonly interactive?: boolean;
+  readonly extensionPopup?: boolean;
 }
 
 export interface PreviewStreamEvents {
@@ -199,6 +206,8 @@ export interface PreviewStreamEvents {
   readonly onClipboard?: (text: string) => void;
   readonly onDownload?: (download: PreviewStreamDownload) => void;
   readonly onPopup?: (tabId: string) => void;
+  readonly onExtensions?: (extensions: readonly PreviewStreamExtension[]) => void;
+  readonly onExtensionPopup?: (open: boolean) => void;
   readonly onFileChooser?: (chooser: PreviewStreamFileChooser | null) => void;
   readonly onConnectedChange: (connected: boolean) => void;
   /** The upgrade was refused; refresh access and start a new client. */
@@ -224,6 +233,7 @@ export function createPreviewStreamClient(
     maxHeight: String(Math.max(1, Math.round(target.maxHeight))),
   });
   if (target.interactive === false) query.set("interactive", "false");
+  if (target.extensionPopup) query.set("extensionPopup", "1");
   const url = withDeviceHubQuery(`${target.access.wsBase}/ws?${query.toString()}`, target.access);
   let stopped = false;
   let socket: WebSocket | null = null;
@@ -286,6 +296,8 @@ export function createPreviewStreamClient(
         phase,
         sequence,
         tabId,
+        extensions,
+        open,
       } = message as Record<string, unknown>;
       if (
         type === "fileChooser" &&
@@ -314,6 +326,21 @@ export function createPreviewStreamClient(
         events.onPointer?.({ phase, x, y, sequence });
       } else if (type === "popup" && typeof tabId === "string") {
         events.onPopup?.(tabId);
+      } else if (type === "extensions" && Array.isArray(extensions)) {
+        events.onExtensions?.(
+          extensions.flatMap((extension: unknown) =>
+            typeof extension === "object" &&
+            extension !== null &&
+            "id" in extension &&
+            typeof extension.id === "string" &&
+            "name" in extension &&
+            typeof extension.name === "string"
+              ? [{ id: extension.id, name: extension.name }]
+              : [],
+          ),
+        );
+      } else if (type === "extensionPopup" && typeof open === "boolean") {
+        events.onExtensionPopup?.(open);
       } else if (type === "clipboard" && typeof text === "string") {
         events.onClipboard?.(text);
       } else if (

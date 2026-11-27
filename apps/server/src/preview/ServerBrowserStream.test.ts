@@ -76,14 +76,17 @@ const mutations = [
   { type: "releaseControl" },
   { type: "dialog", accept: true },
   { type: "viewport", setting: { _tag: "fill" } },
+  { type: "extensionAction", extensionId: "probe" },
 ];
 
 it.effect.each([
-  { hasOperateScope: false, interactive: true },
-  { hasOperateScope: true, interactive: true },
-  { hasOperateScope: true, interactive: false },
-])("streams frames and acks while gating page mutations (%s)", ({ hasOperateScope, interactive }) =>
+  { hasOperateScope: false, interactive: true, extensionPopup: false },
+  { hasOperateScope: true, interactive: true, extensionPopup: false },
+  { hasOperateScope: true, interactive: false, extensionPopup: false },
+  { hasOperateScope: true, interactive: true, extensionPopup: true },
+])("streams with scoped control (%s)", (options) =>
   Effect.gen(function* () {
+    const { hasOperateScope, interactive, extensionPopup } = options;
     const canOperate = hasOperateScope && interactive;
     const scopes = hasOperateScope
       ? [AuthOrchestrationReadScope, AuthPreviewOperateScope]
@@ -95,24 +98,34 @@ it.effect.each([
     const frame = new Uint8Array([255, 216, 255, 217]);
     const output = yield* Queue.make<ServerBrowser.ServerBrowserViewerOutput>();
     yield* Queue.offer(output, { _tag: "viewport", width: 1280, height: 800 });
+    const extensions = [{ id: "probe", name: "Popup Probe" }];
+    if (!extensionPopup) {
+      yield* Queue.offer(output, { _tag: "extensions", extensions });
+      yield* Queue.offer(output, { _tag: "extensionPopup", open: true });
+    }
     yield* Queue.offer(output, {
       _tag: "frame",
       data: frame,
       ack: Effect.sync(() => acked.resolve()),
     });
-    const browser = ServerBrowser.ServerBrowser.of({
-      clearProfile: () => Effect.void,
-      profileReporter: Effect.succeed(() => Effect.void),
-      openDownload: () => Effect.succeedNone,
-      answerFileChooser: () => Effect.succeed(false),
-      attachViewer: (input) =>
+    const attach =
+      (selected: boolean): ServerBrowser.ServerBrowser["Service"]["attachViewer"] =>
+      (input) =>
         Effect.sync(() => {
+          expect(selected).toBe(extensionPopup);
           attachments.push(input);
           return {
             output,
             input: (message) => Effect.sync(() => void inputs.push(message)),
           };
-        }),
+        });
+    const browser = ServerBrowser.ServerBrowser.of({
+      clearProfile: () => Effect.void,
+      profileReporter: Effect.succeed(() => Effect.void),
+      openDownload: () => Effect.succeedNone,
+      answerFileChooser: () => Effect.succeed(false),
+      attachViewer: attach(false),
+      attachExtensionPopupViewer: attach(true),
     });
     const services = yield* Layer.build(
       HttpRouter.serve(
@@ -125,19 +138,19 @@ it.effect.each([
     );
     const server = Context.get(services, HttpServer.HttpServer);
     const origin = HttpServer.formatAddress(server.address).replace(/^http/, "ws");
-    const resource = `/api/preview-stream/ws?threadId=thread&tabId=tab&wsTicket=one-use-ticket${interactive ? "" : "&interactive=false"}`;
+    const resource = `/api/preview-stream/ws?threadId=thread&tabId=tab&wsTicket=one-use-ticket${interactive ? "" : "&interactive=false"}${extensionPopup ? "&extensionPopup=1" : ""}`;
     const received = Promise.withResolvers<void>();
     const socket = yield* Effect.acquireRelease(
       Effect.sync(() => new WebSocket(`${origin}${resource}`)),
       (socket) => Effect.sync(() => socket.close()),
     );
     socket.binaryType = "arraybuffer";
-    const viewports: unknown[] = [];
+    const messages: unknown[] = [];
     const frames: Uint8Array[] = [];
     socket.addEventListener("error", () => received.reject(new Error("stream failed")));
     socket.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
-        viewports.push(JSON.parse(event.data));
+        messages.push(JSON.parse(event.data));
         return;
       }
       frames.push(new Uint8Array(event.data as ArrayBuffer));
@@ -150,7 +163,15 @@ it.effect.each([
     // The socket ack follows every mutation, providing a barrier without sleeps.
     yield* Effect.promise(() => acked.promise);
     expect(frames).toEqual([frame]);
-    expect(viewports).toEqual([{ type: "viewport", width: 1280, height: 800 }]);
+    expect(messages).toEqual([
+      { type: "viewport", width: 1280, height: 800 },
+      ...(extensionPopup
+        ? []
+        : [
+            { type: "extensions", extensions },
+            { type: "extensionPopup", open: true },
+          ]),
+    ]);
     expect(inputs).toEqual(canOperate ? [...mutations, null] : []);
     expect(attachments).toEqual([
       {
@@ -181,6 +202,7 @@ it.effect("sends replies ahead of stale frames and only the newest frame after a
       profileReporter: Effect.succeed(() => Effect.void),
       openDownload: () => Effect.succeedNone,
       answerFileChooser: () => Effect.succeed(false),
+      attachExtensionPopupViewer: () => Effect.die("unused"),
       attachViewer: () => Effect.succeed({ output, input: () => Effect.void }),
     });
     const services = yield* Layer.build(
@@ -261,6 +283,7 @@ it.effect.each([
       profileReporter: Effect.succeed(() => Effect.void),
       openDownload: () => Effect.succeedNone,
       answerFileChooser: () => Effect.succeed(false),
+      attachExtensionPopupViewer: () => Effect.die("unused"),
       attachViewer: () => {
         attachments++;
         return Effect.die("unauthorized viewer must not attach");
@@ -308,6 +331,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
             : Option.none();
         }),
       answerFileChooser: () => Effect.succeed(false),
+      attachExtensionPopupViewer: () => Effect.die("unused"),
       attachViewer: () => Effect.die("unused"),
     });
     const serve = (scopes: ReadonlyArray<AuthEnvironmentScope>, url: string) =>
@@ -357,6 +381,7 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
           });
           return input.chooserId === "chooser-1";
         }),
+      attachExtensionPopupViewer: () => Effect.die("unused"),
       attachViewer: () => Effect.die("unused"),
     });
     const upload = (scopes: ReadonlyArray<AuthEnvironmentScope>, chooser: string) =>
@@ -419,6 +444,7 @@ it.effect.each([
       profileReporter: Effect.succeed(() => Effect.void),
       openDownload: () => Effect.succeedNone,
       answerFileChooser: () => Effect.succeed(false),
+      attachExtensionPopupViewer: () => Effect.die("unused"),
       attachViewer: () => Effect.fail(new ServerBrowser.ServerBrowserLaunchError({ cause: error })),
     });
     const services = yield* Layer.build(
