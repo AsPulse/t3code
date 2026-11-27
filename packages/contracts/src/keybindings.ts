@@ -59,6 +59,8 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "workspace.focusNext",
   "workspace.focusPrevious",
   "sidebar.toggle",
+  "bots.openPrimary",
+  "bots.toggle",
   "navigation.back",
   "navigation.forward",
   "terminal.toggle",

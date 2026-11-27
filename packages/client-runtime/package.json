@@ -195,6 +195,10 @@
       "types": "./src/relay/index.ts",
       "default": "./src/relay/index.ts"
     },
+    "./state/bot-workspace": {
+      "types": "./src/state/botWorkspace.ts",
+      "default": "./src/state/botWorkspace.ts"
+    },
     "./state/auth": {
       "types": "./src/state/auth.ts",
       "default": "./src/state/auth.ts"

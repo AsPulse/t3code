@@ -1,7 +1,10 @@
 import {
+  BOT_TASK_TAG,
+  botOwnerTag,
   CommandId,
   MessageId,
   ThreadId,
+  ThreadTag,
   OrchestratorMcpFailure,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
@@ -15,6 +18,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as BotRegistry from "../../../bot/BotRegistryService.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
@@ -42,6 +46,7 @@ import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../t
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
+const isThreadTag = Schema.is(ThreadTag);
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -403,11 +408,35 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             )?.supportedRuntimeModes,
           });
         }
+        let tags = replaying ? launched?.tags : undefined;
+        if (!replaying && caller !== undefined && input.surface !== "work") {
+          const registry = yield* BotRegistry.BotRegistryService;
+          const workspaces = yield* registry.list().pipe(Effect.mapError(unavailable));
+          if (
+            workspaces.some(
+              (workspace) =>
+                workspace.enabled &&
+                (caller.projectId === workspace.projectId ||
+                  workspace.bots.some((bot) => bot.threadId === caller.id)),
+            )
+          ) {
+            tags = [BOT_TASK_TAG];
+            if (input.notifyOwner !== false) {
+              const ownerTag = botOwnerTag(caller.id);
+              if (isThreadTag(ownerTag)) {
+                tags = [BOT_TASK_TAG, ownerTag];
+              } else {
+                yield* Effect.logWarning("Bot task owner tag is invalid", { threadId: caller.id });
+              }
+            }
+          }
+        }
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
           projectId,
           title: input.title,
+          ...(tags === undefined ? {} : { tags }),
           modelSelection,
           runtimeMode: startedRuntimeMode,
           interactionMode,

@@ -1,3 +1,12 @@
+import { classifyThread, partitionThreads } from "@t3tools/client-runtime/state/bot-workspace";
+import { SidebarBotBar, SidebarSecondaryBots } from "./sidebar/SidebarBotBar";
+import {
+  unfolderedBotFilteredThreads,
+  openBotWorkspaceSettings,
+  setSidebarBotMode,
+  useBotWorkspaceIndex,
+  useSidebarBotMode,
+} from "./sidebar/sidebarBots";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m } from "../i18n/messages";
@@ -58,6 +67,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   AuthOrchestrationOperateScope,
+  BOT_TASK_TAG,
   type ContextMenuSource,
   ProjectId,
   type ScopedThreadRef,
@@ -182,6 +192,7 @@ import {
 } from "./threadActionMenu.logic";
 import {
   applySidebarThreadDrop,
+  resolveBotMove,
   filterSidebarV2VisibleThreads,
   groupSidebarThreadsByProject,
   sidebarFolderExpansionKeys,
@@ -433,6 +444,7 @@ function useSidebarThreads(input: {
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
   // Keeps folders with no active threads, so a project the user filtered to or pinned can start one.
   readonly keepEmptyFolders: (group: SidebarProjectSnapshot) => boolean;
+  readonly allThreads?: readonly EnvironmentThreadShell[];
 }) {
   const {
     projectScopeKey,
@@ -507,7 +519,8 @@ function useSidebarThreads(input: {
   const listedSettledThreads = settledThreads.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettledThreads);
   const settledCount =
-    settledThreads.length + olderSettledShelf.unloadedCount(partition.visibleThreads);
+    settledThreads.length +
+    olderSettledShelf.unloadedCount(input.allThreads ?? partition.visibleThreads);
   const visibleSettledThreads = (() => {
     const visible = listedSettledThreads.slice(0, settledVisibleCount);
     if (
@@ -550,11 +563,15 @@ function useSidebarThreads(input: {
               : EMPTY_THREADS,
           };
         });
+  const unfolderedActiveThreads =
+    input.allThreads && folderGroups !== null
+      ? unfolderedBotFilteredThreads(activeThreads, folderGroups)
+      : EMPTY_THREADS;
   const orderedThreads = [
     ...pinnedThreads,
     ...(projectFolders === null
       ? activeThreads
-      : projectFolders.flatMap((folder) => folder.threads)),
+      : [...projectFolders.flatMap((folder) => folder.threads), ...unfolderedActiveThreads]),
     ...visibleWorkingThreads,
     ...visibleSnoozedThreads,
     ...renderedSettledThreads,
@@ -596,6 +613,7 @@ function useSidebarThreads(input: {
     workingShelfExpanded,
     toggleWorkingShelf: () => setWorkingShelfExpanded((value) => !value),
     projectFolders,
+    unfolderedActiveThreadKeys: new Set(unfolderedActiveThreads.map(threadShellKey)),
     toggleProjectFolder: (group: SidebarProjectSnapshot) => {
       const keys = sidebarFolderExpansionKeys(group);
       setProjectExpanded(keys, !resolveProjectExpanded(projectExpandedById, keys));
@@ -1085,16 +1103,33 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // A scope whose project is gone reads as all projects once every snapshot has
   // loaded. The stored keys are left alone, so the scope returns with its project.
   // An archived project's scope reads as all projects, matching the menu.
-  const scopeGroups = pickableProjectGroups(projectGroups);
+  const botIndex = useBotWorkspaceIndex();
+  const hasBotWorkspace = botIndex.workspaces.length > 0;
+  const mode = useSidebarBotMode((state) => state.mode);
+  const botsMode = hasBotWorkspace && mode === "bots";
+  const isBotProjectGroup = (group: SidebarProjectSnapshot) =>
+    group.memberProjectRefs.some(({ environmentId, projectId }) =>
+      botIndex.projects.get(environmentId)?.has(projectId),
+    );
+  const workProjectGroups = hasBotWorkspace
+    ? projectGroups.filter((group) => !isBotProjectGroup(group))
+    : projectGroups;
+  const scopeGroups = pickableProjectGroups(workProjectGroups);
   const archivedProjectKeys = new Set(
     projectGroups.filter((project) => project.archived).map((project) => project.projectKey),
   );
-  const chosenProjectScopeKeys = resolveSidebarProjectScopeKeys({
-    groups: projectGroups,
-    keys: persistedProjectScopeKeys,
-    settings: projectGroupingSettings,
-    canClearMissingScope: allProjectSnapshotsReady && allProjectConfigsReady,
-  }).filter((key) => !archivedProjectKeys.has(key));
+  const chosenProjectScopeKeys = botsMode
+    ? []
+    : resolveSidebarProjectScopeKeys({
+        groups: projectGroups,
+        keys: persistedProjectScopeKeys,
+        settings: projectGroupingSettings,
+        canClearMissingScope: allProjectSnapshotsReady && allProjectConfigsReady,
+      }).filter(
+        (key) =>
+          !archivedProjectKeys.has(key) &&
+          (!hasBotWorkspace || scopeGroups.some((group) => group.projectKey === key)),
+      );
   const chosenProjectGroups = scopeGroups.filter((project) =>
     chosenProjectScopeKeys.includes(project.projectKey),
   );
@@ -1108,7 +1143,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
-  const threads = useQuietThreadShells();
+  const allThreads = useQuietThreadShells();
+  const botPartition = partitionThreads(botIndex, allThreads);
+  const threads = botsMode ? botPartition.botTasks : botPartition.work;
+  const setThreadTag = useOrchestrationCommand(threadEnvironment.setTag);
+  const changeBotMode = (next: "work" | "bots") => {
+    setSidebarBotMode(next);
+    scrollSidebarToTop(sidebarContentRef.current);
+  };
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1175,7 +1217,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   };
   // Pinning from a row keeps rows in place while the menu is open.
   const projectScopeItems = useOrderWhileOpen(
-    lookupProjectScopeItems,
+    hasBotWorkspace
+      ? lookupProjectScopeItems.filter(
+          (item) =>
+            item.value === "all" || scopeGroups.some((group) => group.projectKey === item.value),
+        )
+      : lookupProjectScopeItems,
     (item) => item.value,
     projectScopeMenuState.open,
   );
@@ -1202,9 +1249,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
   const routeDraftIdForRows = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
   const visibleDraftSessionCount = useComposerDraftStore((store) => {
+    if (botsMode) return 0;
     let count = 0;
     for (const [draftKey, session] of Object.entries(store.draftThreadsByThreadKey)) {
-      if (session.promotedTo != null) {
+      if (
+        session.promotedTo != null ||
+        botIndex.projects.get(session.environmentId)?.has(session.projectId)
+      ) {
         continue;
       }
       if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
@@ -1330,6 +1381,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     workingShelfExpanded,
     toggleWorkingShelf,
     projectFolders,
+    unfolderedActiveThreadKeys,
     toggleProjectFolder,
     renderedSettledThreads,
     visibleSnoozedThreads,
@@ -1352,12 +1404,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     threads: listedThreads,
     delegatedUnderParent,
     routeRowThreadKey,
-    folderGroups: boringSidebarEnabled
-      ? scopedProjectGroups.length === 0
-        ? // An archived project keeps a folder for its active threads, below the rest.
-          [...scopeGroups, ...projectGroups.filter((project) => project.archived)]
-        : scopedProjectGroups
-      : null,
+    ...(hasBotWorkspace ? { allThreads } : {}),
+    folderGroups:
+      boringSidebarEnabled && !botsMode
+        ? scopedProjectGroups.length === 0
+          ? // An archived project keeps a folder for its active threads, below the rest.
+            [...scopeGroups, ...workProjectGroups.filter((project) => project.archived)]
+          : scopedProjectGroups
+        : null,
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
@@ -2665,9 +2719,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 AuthOrchestrationOperateScope,
               ),
               branch: thread.branch ?? null,
+              botMove:
+                hasBotWorkspace && configLoaded
+                  ? resolveBotMove(botsMode, classifyThread(botIndex, thread))
+                  : null,
               // An archived project is not a filter choice.
               projectFilter:
-                threadProjectGroup && !threadProjectGroup.archived
+                !botsMode &&
+                threadProjectGroup &&
+                !threadProjectGroup.archived &&
+                (!hasBotWorkspace || !isBotProjectGroup(threadProjectGroup))
                   ? {
                       label: threadProjectGroup.displayName,
                       isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
@@ -2700,6 +2761,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        if (clicked.value === "move-to-work" || clicked.value === "move-to-bots") {
+          await setThreadTag({
+            environmentId: threadRef.environmentId,
+            input: {
+              threadId: threadRef.threadId,
+              tag: BOT_TASK_TAG,
+              tagged: clicked.value === "move-to-bots",
+            },
+          });
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -2996,6 +3068,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   return (
     <SidebarFolderDrop>
       <SidebarChromeHeader isElectron={isElectron} />
+      {hasBotWorkspace ? (
+        <SidebarBotBar
+          index={botIndex}
+          mode={botsMode ? "bots" : "work"}
+          threads={allThreads}
+          botTasks={botPartition.botTasks}
+          onModeChange={changeBotMode}
+          onOpenBot={navigateToThread}
+          onAddBot={(workspace) =>
+            openBotWorkspaceSettings(router, projectGroups, workspace, () => {
+              if (isMobile) setOpenMobile(false);
+            })
+          }
+        />
+      ) : null}
       <SidebarContent
         ref={sidebarContentRef}
         className="min-h-full"
@@ -3003,6 +3090,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
               hasProjects={projectGroups.length > 0}
+              showProjectScope={!botsMode}
               projectScope={
                 <Combobox
                   items={projectScopeItems}
@@ -3239,6 +3327,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           </SidebarGroup>
         }
       >
+        {botsMode ? <SidebarSecondaryBots index={botIndex} onOpenBot={navigateToThread} /> : null}
         <SidebarGroup className="flex-1" role="presentation">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
@@ -3531,21 +3620,29 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         );
                       };
                       const from = isContextDrag ? null : (dragState?.activeSection ?? null);
-                      const items: ReactNode[] = [
-                        <SidebarDraftBlock
-                          key="draft-sessions"
-                          projectByKey={projectByKey}
-                          projectDisplayNameByKey={projectDisplayNameByKey}
-                          scopedProjectKeys={scopedProjectKeys}
-                          routeDraftId={routeDraftIdForRows}
-                          onNavigateToDraft={navigateToDraft}
-                          onDraftContextMenu={handleDraftContextMenu}
-                        />,
-                      ];
+                      const items: ReactNode[] = botsMode
+                        ? []
+                        : [
+                            <SidebarDraftBlock
+                              key="draft-sessions"
+                              projectByKey={projectByKey}
+                              projectDisplayNameByKey={projectDisplayNameByKey}
+                              scopedProjectKeys={scopedProjectKeys}
+                              excludedProjects={hasBotWorkspace ? botIndex.projects : undefined}
+                              routeDraftId={routeDraftIdForRows}
+                              onNavigateToDraft={navigateToDraft}
+                              onDraftContextMenu={handleDraftContextMenu}
+                            />,
+                          ];
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           // Folders draw active rows in their own place below.
-                          if (projectFolders !== null && item.section === "active") continue;
+                          if (
+                            projectFolders !== null &&
+                            item.section === "active" &&
+                            !unfolderedActiveThreadKeys.has(item.key)
+                          )
+                            continue;
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
                           continue;
                         }
