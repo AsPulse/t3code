@@ -94,6 +94,11 @@ import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
+import {
+  assertAgentCanAccessTab,
+  isExtensionTab,
+  isExtensionUrl,
+} from "./ServerBrowserExtensions.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
 
@@ -339,6 +344,7 @@ interface ServerTab {
   readonly threadId: ThreadId;
   readonly tabId: string;
   readonly page: Page;
+  readonly extension: boolean;
   readonly cdp: CDPSession;
   readonly frameSessions: Map<Frame, CDPSession>;
   /** Copy reads run in key order, outside the input queue. */
@@ -410,6 +416,12 @@ interface ServerTab {
   recordingStart: Promise<Recording> | null;
   captureLock: Promise<void>;
   capturing: number;
+}
+
+interface AdoptedPage {
+  readonly page: Page;
+  readonly openerTabId?: string;
+  readonly extension: boolean;
 }
 
 interface ServerDownload {
@@ -600,7 +612,8 @@ const make = Effect.gen(function* () {
   >();
 
   const closedPendingTabs = new Set<string>();
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<string, AdoptedPage>();
+  const adoptedBrowserPages = new WeakSet<Page>();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -641,7 +654,7 @@ const make = Effect.gen(function* () {
 
   // Playwright cannot reload a crashed page, so a fresh page takes over its tab.
   const reopenCrashedTab = async (tab: ServerTab) => {
-    if (tab.desktop) return dropTab(tab, true);
+    if (tab.desktop || tab.extension) return dropTab(tab, true);
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     const crash = {
@@ -1154,6 +1167,7 @@ const make = Effect.gen(function* () {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
       page,
+      extension: adopted?.extension ?? false,
       cdp,
       frameSessions: new Map(),
       copyReads: Promise.resolve(),
@@ -1360,7 +1374,9 @@ const make = Effect.gen(function* () {
     page.on("download", (download) => void saveDownload(tab, download));
     updateFileChooserInterception(tab);
     // Popups become tabs and keep `window.opener`, so sign-in popups can report back.
-    page.on("popup", (popup) => void adoptPopup(tab, popup));
+    page.on("popup", (popup) =>
+      adoptPage(tab, { page: popup, openerTabId: tab.tabId, extension: isExtensionTab(tab) }),
+    );
     const key = tabKey(tab.threadId, tab.tabId);
     if (closedPendingTabs.delete(key)) {
       if (desktop) {
@@ -1373,9 +1389,13 @@ const make = Effect.gen(function* () {
     page.on("close", () => dropTab(tab, true));
     page.on("crash", () => reopenCrashedTab(tab));
     tabs.set(key, tab);
+    if (!desktop) {
+      for (const candidate of context.pages()) void adoptExtensionPage(context, candidate);
+    }
     reportLiveTabs();
     // A desktop page navigates on its own and can finish loading before these listeners attach.
-    if (desktop) void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
+    if (desktop || tab.extension)
+      void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
     // Existing desktop and popup PDFs can start loading before interception attaches.
     if (
       snapshot.navStatus._tag === "Loading" &&
@@ -1632,6 +1652,7 @@ const make = Effect.gen(function* () {
   const prepareContext = async (context: BrowserContext) => {
     if (preparedContexts.has(context)) return;
     preparedContexts.add(context);
+    context.on("page", (page) => adoptExtensionPage(context, page));
     await context.grantPermissions(["clipboard-write"]);
   };
 
@@ -1701,38 +1722,43 @@ const make = Effect.gen(function* () {
     return copies.flat().find((text) => text.length > 0);
   };
 
-  const adoptPopup = async (opener: ServerTab, popup: Page) => {
-    if (opener.closing) {
-      await popup.close().catch(constVoid);
+  const adoptExtensionPage = async (context: BrowserContext, page: Page) => {
+    if (!isExtensionUrl(page.url()) || (await page.opener()) !== null) return;
+    const contextTabs = [...tabs.values()].filter((tab) => tab.page.context() === context);
+    if (contextTabs.some((tab) => tab.page === page)) return;
+    const home = contextTabs.filter((tab) => !tab.closing).sort(preferVisibleRecentTab)[0];
+    if (home) await adoptPage(home, { page, extension: true });
+  };
+
+  const adoptPage = async (home: ServerTab, adopted: AdoptedPage) => {
+    const page = adopted.page;
+    if (adoptedBrowserPages.has(page)) return;
+    adoptedBrowserPages.add(page);
+    if (home.closing) {
+      await page.close().catch(constVoid);
       return;
     }
-    const url = popup.url();
+    const url = page.url();
+    const agentId = adopted.extension ? null : home.control.agentId;
 
-    const controller = [...opener.viewers].find(
-      (viewer) => viewer.id === opener.control.controller,
-    );
+    const controller = [...home.viewers].find((viewer) => viewer.id === home.control.controller);
     await runPromise(
       openTab({
-        threadId: opener.threadId,
+        threadId: home.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
-        ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
-        colorScheme: opener.colorScheme,
-        ...(opener.control.agentId === null
-          ? {}
-          : { automationOwner: opener.control.agentId, reveal: false }),
+        ...(home.profileId === undefined ? {} : { profileId: home.profileId }),
+        colorScheme: home.colorScheme,
+        ...(agentId === null ? {} : { automationOwner: agentId, reveal: false }),
         beforePublish: (snapshot) =>
-          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
-            page: popup,
-            openerTabId: opener.tabId,
-          }),
+          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), adopted),
       }),
     ).then(
       (tab) => {
-        if (opener.control.agentId === null) controller?.push({ _tag: "popup", tabId: tab.tabId });
+        if (agentId === null) controller?.push({ _tag: "popup", tabId: tab.tabId });
       },
       async () => {
-        await popup.close().catch(constVoid);
+        await page.close().catch(constVoid);
       },
     );
   };
@@ -1796,6 +1822,9 @@ const make = Effect.gen(function* () {
   // The desktop draws its tabs in its own webview, so they never get a streamed viewer.
   const isVisible = (tab: ServerTab) =>
     tab.viewers.size > 0 || (tab.desktop !== null && desktopChannel.isShown(tab));
+
+  const preferVisibleRecentTab = (left: ServerTab, right: ServerTab) =>
+    Number(isVisible(right)) - Number(isVisible(left)) || right.usedAt - left.usedAt;
 
   const reclaimingTabs = new Set<ServerTab>();
   const idleAgentTabs = () => {
@@ -1892,15 +1921,14 @@ const make = Effect.gen(function* () {
   };
 
   const latestThreadTab = (threadId: string, agentSessionId?: string) => {
-    const threadTabs = [...tabs.values()].filter((tab) => tab.threadId === threadId);
+    const threadTabs = [...tabs.values()].filter(
+      (tab) => tab.threadId === threadId && !isExtensionTab(tab),
+    );
     return (
       threadTabs
         .filter((tab) => tab.control.agentId === agentSessionId)
         .sort((left, right) => right.createdAt - left.createdAt)[0] ??
-      threadTabs.sort(
-        (left, right) =>
-          Number(isVisible(right)) - Number(isVisible(left)) || right.usedAt - left.usedAt,
-      )[0]
+      threadTabs.sort(preferVisibleRecentTab)[0]
     );
   };
 
@@ -2144,7 +2172,7 @@ const make = Effect.gen(function* () {
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
       tabs: [...tabs.values()]
-        .filter((candidate) => candidate.threadId === tab.threadId)
+        .filter((candidate) => candidate.threadId === tab.threadId && !isExtensionTab(candidate))
         .map((candidate) => ({
           tabId: candidate.tabId,
           url:
@@ -2515,6 +2543,7 @@ const make = Effect.gen(function* () {
         message: "No server preview tab is open for this thread. Call preview_open first.",
       });
     }
+    assertAgentCanAccessTab(tab);
     if (!READ_OPERATIONS.has(request.operation) && !tab.control.agentMayAct(request.agentSessionId))
       throw new BrowserControlInterrupted({
         message:
@@ -2541,13 +2570,14 @@ const make = Effect.gen(function* () {
   ): Promise<unknown> => {
     const input = request.input;
     switch (request.operation) {
-      case "status":
-        return statusWithTitle(
+      case "status": {
+        const tab =
           request.tabId === undefined
             ? latestThreadTab(request.threadId, request.agentSessionId)
-            : tabs.get(tabKey(request.threadId, request.tabId)),
-          request.agentSessionId,
-        );
+            : tabs.get(tabKey(request.threadId, request.tabId));
+        if (tab) assertAgentCanAccessTab(tab);
+        return statusWithTitle(tab, request.agentSessionId);
+      }
       case "open": {
         if (!request.agentSessionId)
           throw new BrowserControlInterrupted({
@@ -2593,6 +2623,7 @@ const make = Effect.gen(function* () {
               : "The requested server preview tab does not exist.",
           });
         }
+        if (found) assertAgentCanAccessTab(found);
         // Reusing another session's tab requires explicit tabId; reading it grants no implicit takeover.
         const existing =
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
